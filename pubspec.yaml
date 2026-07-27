@@ -1,7 +1,7 @@
 name: drinkverse
 description: "Simulateur immersif de boissons interactives."
 publish_to: 'none'
-version: 0.3.0+3
+version: 0.4.0+4
 
 environment:
   sdk: ^3.12.2
@@ -9,6 +9,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  audioplayers: ^6.8.1
   cupertino_icons: ^1.0.8
   sensors_plus: ^7.1.0
 
