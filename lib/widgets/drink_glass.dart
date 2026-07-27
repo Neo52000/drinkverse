@@ -30,7 +30,6 @@ class DrinkGlass extends StatefulWidget {
 class _DrinkGlassState extends State<DrinkGlass>
     with SingleTickerProviderStateMixin {
   static const int _pointCount = 33;
-  static const double _dt = 1 / 60;
 
   late final AnimationController _controller;
   late final List<double> _surface;
@@ -46,24 +45,37 @@ class _DrinkGlassState extends State<DrinkGlass>
   double _motionEnergy = 0;
   double _foamEnergy = 0;
   double _lastGyroMagnitude = 0;
+  double _drinkAngle = 0;
+  double _displayFill = 0.72;
   bool _sensorActive = false;
+  bool _immersive = false;
+  bool _wasPouring = false;
   DateTime _lastFeedback = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
   void initState() {
     super.initState();
+    _displayFill = widget.fillLevel;
     _surface = List<double>.filled(_pointCount, 0);
     _velocity = List<double>.filled(_pointCount, 0);
     _nextSurface = List<double>.filled(_pointCount, 0);
 
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 10),
+      duration: const Duration(seconds: 8),
     )
       ..addListener(_stepPhysics)
       ..repeat();
 
     _startSensors();
+  }
+
+  @override
+  void didUpdateWidget(covariant DrinkGlass oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.fillLevel != widget.fillLevel && !_immersive) {
+      _displayFill = widget.fillLevel;
+    }
   }
 
   void _startSensors() {
@@ -73,10 +85,13 @@ class _DrinkGlassState extends State<DrinkGlass>
       (event) {
         _sensorActive = true;
 
-        // Sur Android en mode portrait, event.x augmente quand le côté gauche
-        // du téléphone descend. La surface du liquide doit monter de ce côté.
-        // Le signe positif corrige l'inversion observée sur le Samsung testé.
+        // Axe horizontal corrigé pour un téléphone tenu en portrait.
         _targetTilt = (event.x / 9.81).clamp(-1.0, 1.0);
+
+        // Téléphone vertical : y proche de 9,81. En levant le bas du téléphone
+        // vers la bouche, y diminue progressivement vers zéro.
+        final verticalComponent = (event.y.abs() / 9.81).clamp(0.0, 1.0);
+        _drinkAngle = (1.0 - verticalComponent).clamp(0.0, 1.0);
       },
       onError: (_) => _sensorActive = false,
       cancelOnError: false,
@@ -88,23 +103,19 @@ class _DrinkGlassState extends State<DrinkGlass>
       (event) {
         final magnitude = math.sqrt(
           event.x * event.x + event.y * event.y + event.z * event.z,
-        ).clamp(0.0, 16.0);
-
+        ).clamp(0.0, 15.0);
         final impulse = (magnitude - _lastGyroMagnitude).abs();
         _lastGyroMagnitude = magnitude;
 
-        final normalized = (magnitude / 7.5).clamp(0.0, 1.0);
+        final normalized = (magnitude / 8).clamp(0.0, 1.0);
         _motionEnergy = math.max(_motionEnergy, normalized);
-        _foamEnergy = math.max(
-          _foamEnergy,
-          (normalized * 1.25).clamp(0.0, 1.0),
-        );
+        _foamEnergy = math.max(_foamEnergy, (normalized * 1.2).clamp(0.0, 1.0));
 
-        final direction = (event.y * 0.85 + event.z * 0.35).clamp(-8.0, 8.0);
-        _injectImpulse(direction * 0.48, event.x);
+        final direction = (event.y * 0.8 + event.z * 0.35).clamp(-7.0, 7.0);
+        _injectImpulse(direction * 0.42, event.x);
 
-        if ((widget.drink.ice && impulse > 1.2) ||
-            (widget.drink.foam && impulse > 2.0)) {
+        if ((widget.drink.ice && impulse > 1.25) ||
+            (widget.drink.foam && impulse > 2.1)) {
           _playMotionFeedback();
         }
       },
@@ -116,15 +127,15 @@ class _DrinkGlassState extends State<DrinkGlass>
   void _injectImpulse(double strength, double lateralAxis) {
     final center = lateralAxis >= 0 ? _pointCount * 2 ~/ 3 : _pointCount ~/ 3;
     for (var i = 0; i < _pointCount; i++) {
-      final distance = (i - center).toDouble();
-      final influence = math.exp(-(distance * distance) / 34);
+      final distance = (i - center).abs();
+      final influence = math.exp(-distance * distance / 28);
       _velocity[i] += strength * influence;
     }
   }
 
   void _playMotionFeedback() {
     final now = DateTime.now();
-    if (now.difference(_lastFeedback).inMilliseconds < 380) return;
+    if (now.difference(_lastFeedback).inMilliseconds < 360) return;
     _lastFeedback = now;
     SystemSound.play(SystemSoundType.click);
     HapticFeedback.lightImpact();
@@ -133,41 +144,69 @@ class _DrinkGlassState extends State<DrinkGlass>
   void _stepPhysics() {
     if (!mounted || widget.paused) return;
 
-    final fallback = math.sin(_controller.value * math.pi * 2) * 0.008;
+    const dt = 1 / 60;
+    final fallback = math.sin(_controller.value * math.pi * 2) * 0.012;
     final desiredTilt = _sensorActive ? _targetTilt : fallback;
 
-    // Filtre ressort pour éviter l'effet "capteur collé".
-    final tiltAcceleration = (desiredTilt - _smoothedTilt) * 30 -
-        _tiltVelocity * 8.2;
-    _tiltVelocity += tiltAcceleration * _dt;
-    _smoothedTilt += _tiltVelocity * _dt;
+    final tiltAcceleration = (desiredTilt - _smoothedTilt) * 30 - _tiltVelocity * 8;
+    _tiltVelocity += tiltAcceleration * dt;
+    _smoothedTilt += _tiltVelocity * dt;
 
-    // Surface discrétisée : ressort vertical + couplage entre voisins.
     for (var i = 0; i < _pointCount; i++) {
       final normalizedX = i / (_pointCount - 1) * 2 - 1;
-      final equilibrium = normalizedX * _smoothedTilt * 54;
+      final equilibrium = normalizedX * _smoothedTilt * 52;
       final left = i == 0 ? _surface[i] : _surface[i - 1];
       final right = i == _pointCount - 1 ? _surface[i] : _surface[i + 1];
-
-      final neighborForce = (left + right - 2 * _surface[i]) * 29;
+      final neighborForce = (left + right - 2 * _surface[i]) * 27;
       final springForce = (equilibrium - _surface[i]) * 17;
-      final dampingForce = -_velocity[i] * 4.25;
-      final acceleration = neighborForce + springForce + dampingForce;
-
-      _velocity[i] += acceleration * _dt;
-      _nextSurface[i] = _surface[i] + _velocity[i] * _dt;
+      final dampingForce = -_velocity[i] * 4.4;
+      _velocity[i] += (neighborForce + springForce + dampingForce) * dt;
+      _nextSurface[i] = _surface[i] + _velocity[i] * dt;
     }
 
     for (var i = 0; i < _pointCount; i++) {
       _surface[i] = _nextSurface[i];
     }
 
-    _motionEnergy *= 0.974;
-    _foamEnergy *= 0.989;
+    if (_immersive && _displayFill > 0) {
+      // Le verre commence à se vider une fois le téléphone incliné au-delà
+      // d'environ 55 degrés. Plus l'angle est prononcé, plus le débit augmente.
+      final pourFactor = ((_drinkAngle - 0.58) / 0.42).clamp(0.0, 1.0);
+      final pouring = pourFactor > 0.02;
+      if (pouring) {
+        final flowRate = 0.055 + pourFactor * 0.23;
+        _displayFill = (_displayFill - flowRate * dt).clamp(0.0, 0.96);
+        _motionEnergy = math.max(_motionEnergy, 0.28 + pourFactor * 0.55);
+        _foamEnergy = math.max(_foamEnergy, 0.2 + pourFactor * 0.35);
+      }
+      if (pouring && !_wasPouring) {
+        HapticFeedback.selectionClick();
+      }
+      if (!pouring && _wasPouring && _displayFill <= 0.01) {
+        HapticFeedback.mediumImpact();
+      }
+      _wasPouring = pouring;
+    }
+
+    _motionEnergy *= 0.972;
+    _foamEnergy *= 0.988;
     if (_motionEnergy < 0.001) _motionEnergy = 0;
     if (_foamEnergy < 0.001) _foamEnergy = 0;
 
     setState(() {});
+  }
+
+  void _refill() {
+    if (!_immersive || _displayFill > 0.03) return;
+    setState(() {
+      _displayFill = widget.fillLevel.clamp(0.55, 0.92);
+      _foamEnergy = widget.drink.foam ? 0.8 : 0.2;
+      _motionEnergy = 0.55;
+      for (var i = 0; i < _pointCount; i++) {
+        _velocity[i] += math.sin(i / (_pointCount - 1) * math.pi) * 4;
+      }
+    });
+    HapticFeedback.mediumImpact();
   }
 
   @override
@@ -182,20 +221,37 @@ class _DrinkGlassState extends State<DrinkGlass>
 
   @override
   Widget build(BuildContext context) {
-    return RepaintBoundary(
-      child: CustomPaint(
-        size: const Size(286, 410),
-        painter: DrinkGlassPainter(
-          drink: widget.drink,
-          progress: _controller.value,
-          surface: List<double>.unmodifiable(_surface),
-          motionEnergy: _motionEnergy,
-          foamEnergy: _foamEnergy,
-          fillLevel: widget.fillLevel,
-          bubbles: widget.bubbles,
-          condensation: widget.condensation,
-        ),
-      ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maxWidth = constraints.maxWidth.isFinite ? constraints.maxWidth : 286.0;
+        final maxHeight = constraints.maxHeight.isFinite ? constraints.maxHeight : 410.0;
+        _immersive = maxHeight >= 520 && maxWidth >= 280;
+
+        final size = _immersive
+            ? Size(maxWidth, maxHeight)
+            : Size(math.min(maxWidth, 286), math.min(maxHeight, 410));
+
+        return GestureDetector(
+          onTap: _refill,
+          child: RepaintBoundary(
+            child: CustomPaint(
+              size: size,
+              painter: DrinkGlassPainter(
+                drink: widget.drink,
+                progress: _controller.value,
+                surface: List<double>.unmodifiable(_surface),
+                motionEnergy: _motionEnergy,
+                foamEnergy: _foamEnergy,
+                fillLevel: _displayFill,
+                bubbles: widget.bubbles,
+                condensation: widget.condensation,
+                immersive: _immersive,
+                drinkAngle: _drinkAngle,
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -210,6 +266,8 @@ class DrinkGlassPainter extends CustomPainter {
     required this.fillLevel,
     required this.bubbles,
     required this.condensation,
+    required this.immersive,
+    required this.drinkAngle,
   });
 
   final Drink drink;
@@ -220,14 +278,24 @@ class DrinkGlassPainter extends CustomPainter {
   final double fillLevel;
   final bool bubbles;
   final bool condensation;
+  final bool immersive;
+  final double drinkAngle;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final body = Rect.fromLTWH(22, 10, size.width - 44, size.height - 30);
-    final glass = RRect.fromRectAndRadius(body, const Radius.circular(52));
-    final inner = glass.deflate(9);
+    final horizontalMargin = immersive ? 0.0 : 22.0;
+    final verticalMargin = immersive ? 0.0 : 10.0;
+    final body = Rect.fromLTWH(
+      horizontalMargin,
+      verticalMargin,
+      size.width - horizontalMargin * 2,
+      size.height - (immersive ? 0 : 30),
+    );
+    final radius = immersive ? Radius.zero : const Radius.circular(52);
+    final glass = RRect.fromRectAndRadius(body, radius);
+    final inner = immersive ? glass : glass.deflate(9);
 
-    _drawShadow(canvas, glass);
+    if (!immersive) _drawAmbientShadow(canvas, glass);
     _drawRearGlass(canvas, glass);
 
     canvas.save();
@@ -235,18 +303,28 @@ class DrinkGlassPainter extends CustomPainter {
     _drawLiquid(canvas, size, inner);
     if (drink.ice) _drawIce(canvas, size, inner);
     if (bubbles) _drawBubbles(canvas, size, inner);
-    if (drink.foam) _drawFoam(canvas, size, inner);
-    _drawLightRays(canvas, size, inner);
+    if (drink.foam && fillLevel > 0.015) _drawFoam(canvas, size, inner);
+    _drawLiquidLight(canvas, size, inner);
     if (condensation) _drawCondensation(canvas, inner);
     canvas.restore();
 
-    _drawFrontGlass(canvas, glass, body);
-    _drawBase(canvas, size);
+    if (!immersive) {
+      _drawFrontGlass(canvas, glass, body);
+      _drawBase(canvas, size);
+    } else {
+      _drawFullscreenEdges(canvas, size);
+      if (fillLevel <= 0.015) _drawEmptyMessage(canvas, size);
+    }
   }
 
   double _baseTop(Size size) {
+    if (immersive) {
+      final minimumTop = size.height * 0.08;
+      final maximumTop = size.height * 0.96;
+      return maximumTop - (maximumTop - minimumTop) * fillLevel.clamp(0.0, 0.96);
+    }
     final usable = size.height - 88;
-    return 42 + usable * (1 - fillLevel.clamp(0.30, 0.96));
+    return 42 + usable * (1 - fillLevel.clamp(0.0, 0.96));
   }
 
   double _surfaceAt(double x, RRect inner, Size size) {
@@ -254,19 +332,17 @@ class DrinkGlassPainter extends CustomPainter {
     final scaled = ratio * (surface.length - 1);
     final low = scaled.floor().clamp(0, surface.length - 1);
     final high = math.min(low + 1, surface.length - 1);
-    final interpolation = scaled - low;
-    final displacement =
-        surface[low] * (1 - interpolation) + surface[high] * interpolation;
-    final microWave = math.sin(
-          ratio * math.pi * 7 + progress * math.pi * 2.2,
-        ) *
-        (0.45 + motionEnergy * 2.2);
-    return _baseTop(size) + displacement + microWave;
+    final t = scaled - low;
+    final displacement = surface[low] * (1 - t) + surface[high] * t;
+    final scale = immersive ? size.width / 286 : 1.0;
+    final microWave = math.sin(ratio * math.pi * 6 + progress * math.pi * 2.4) *
+        (0.7 + motionEnergy * 2.8) * scale.clamp(0.8, 1.7);
+    return _baseTop(size) + displacement * scale.clamp(0.8, 1.8) + microWave;
   }
 
   Path _liquidPath(Size size, RRect inner) {
     final path = Path();
-    const segments = 90;
+    const segments = 96;
     for (var i = 0; i <= segments; i++) {
       final x = inner.left + inner.width * i / segments;
       final y = _surfaceAt(x, inner, size);
@@ -278,22 +354,12 @@ class DrinkGlassPainter extends CustomPainter {
       ..close();
   }
 
-  void _drawShadow(Canvas canvas, RRect glass) {
+  void _drawAmbientShadow(Canvas canvas, RRect glass) {
     canvas.drawRRect(
-      glass.shift(const Offset(0, 14)),
+      glass.shift(const Offset(0, 13)),
       Paint()
         ..color = drink.color.withValues(alpha: 0.30)
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 38),
-    );
-    canvas.drawOval(
-      Rect.fromCenter(
-        center: Offset(glass.center.dx, glass.bottom + 13),
-        width: glass.width * 0.76,
-        height: 28,
-      ),
-      Paint()
-        ..color = Colors.black.withValues(alpha: 0.72)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 15),
     );
   }
 
@@ -304,13 +370,11 @@ class DrinkGlassPainter extends CustomPainter {
         ..shader = const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          stops: [0, 0.14, 0.48, 0.82, 1],
           colors: [
-            Color(0x70FFFFFF),
-            Color(0x16000000),
-            Color(0x05000000),
-            Color(0x24000000),
-            Color(0x58FFFFFF),
+            Color(0x52FFFFFF),
+            Color(0x10000000),
+            Color(0x04000000),
+            Color(0x22FFFFFF),
           ],
         ).createShader(glass.outerRect),
     );
@@ -319,70 +383,59 @@ class DrinkGlassPainter extends CustomPainter {
   void _drawLiquid(Canvas canvas, Size size, RRect inner) {
     final path = _liquidPath(size, inner);
     final top = _baseTop(size);
-
     canvas.drawPath(
       path,
       Paint()
         ..shader = LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          stops: const [0, 0.12, 0.40, 0.72, 1],
+          stops: const [0, 0.16, 0.48, 0.78, 1],
           colors: [
             Color.lerp(drink.color, Colors.white, 0.38)!,
-            Color.lerp(drink.color, Colors.white, 0.13)!,
+            Color.lerp(drink.color, Colors.white, 0.12)!,
             drink.color,
             Color.lerp(drink.color, Colors.black, 0.22)!,
             Color.lerp(drink.color, Colors.black, 0.50)!,
           ],
         ).createShader(
-          Rect.fromLTWH(
-            inner.left,
-            top - 45,
-            inner.width,
-            inner.bottom - top + 45,
-          ),
+          Rect.fromLTWH(inner.left, top - 60, inner.width, inner.bottom - top + 60),
         ),
     );
 
     final surfacePath = Path();
-    const segments = 90;
+    const segments = 96;
     for (var i = 0; i <= segments; i++) {
       final x = inner.left + inner.width * i / segments;
       final y = _surfaceAt(x, inner, size);
       i == 0 ? surfacePath.moveTo(x, y) : surfacePath.lineTo(x, y);
     }
-
     canvas.drawPath(
       surfacePath,
       Paint()
-        ..color = Color.lerp(drink.color, Colors.white, 0.60)!
-            .withValues(alpha: 0.94)
+        ..color = Color.lerp(drink.color, Colors.white, 0.62)!
+            .withValues(alpha: 0.92)
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.5
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 1.3),
+        ..strokeWidth = immersive ? 3.2 : 2.4
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 1.5),
     );
   }
 
   void _drawFoam(Canvas canvas, Size size, RRect inner) {
     final layers = 2 + (foamEnergy * 4).round();
+    final baseRadius = immersive ? 7.0 : 4.4;
     for (var layer = 0; layer < layers; layer++) {
-      final count = 25 + layer * 4;
+      final count = immersive ? 44 : 28;
       for (var i = 0; i < count; i++) {
         final ratio = (i + 0.5) / count;
         final x = inner.left + ratio * inner.width;
-        final y = _surfaceAt(x, inner, size) - 2 - layer * 5.1;
-        final radius = 3.2 + ((i * 19 + layer * 7) % 5) * 0.75;
-        canvas.drawCircle(
-          Offset(x + 1, y + 2),
-          radius,
-          Paint()..color = const Color(0xFFC49457).withValues(alpha: 0.25),
-        );
+        final y = _surfaceAt(x, inner, size) - layer * baseRadius * 0.75;
+        final radius = baseRadius + ((i * 13 + layer * 7) % 5) * 0.75;
         canvas.drawCircle(
           Offset(x, y),
           radius,
-          Paint()..color = const Color(0xFFF9EBCF).withValues(alpha: 0.96),
+          Paint()..color = const Color(0xFFF8E8C8).withValues(alpha: 0.94),
         );
-        if ((i + layer) % 4 == 0) {
+        if ((i + layer) % 5 == 0) {
           canvas.drawCircle(
             Offset(x - radius * 0.25, y - radius * 0.3),
             radius * 0.22,
@@ -394,103 +447,83 @@ class DrinkGlassPainter extends CustomPainter {
   }
 
   void _drawBubbles(Canvas canvas, Size size, RRect inner) {
+    if (fillLevel <= 0.015) return;
+    final count = (immersive ? 75 : 30) + (motionEnergy * 24).round();
     final top = _baseTop(size);
-    final count = 34 + (motionEnergy * 18).round();
     for (var i = 0; i < count; i++) {
-      final seed = i * 97;
-      final xRatio = ((seed % 101) / 101.0);
-      final speed = 0.32 + (i % 7) * 0.07;
-      final cycle = (progress * speed * 10 + i * 0.071) % 1;
-      final x = inner.left + 8 + xRatio * (inner.width - 16) +
-          math.sin(progress * math.pi * 2 + i) * 2.5;
-      final y = inner.bottom - 12 - cycle * (inner.bottom - top - 18);
-      final radius = 1.2 + (i % 6) * 0.58;
-
+      final seed = i * 47 + 19;
+      final x = inner.left + 12 + (seed % 997) / 997 * (inner.width - 24);
+      final speed = 0.35 + (i % 7) * 0.08;
+      final cycle = (progress * speed + i * 0.071) % 1;
+      final y = inner.bottom - 14 - cycle * math.max(0, inner.bottom - top - 22);
+      if (y < _surfaceAt(x, inner, size) + 5) continue;
+      final radius = (immersive ? 2.2 : 1.5) + (i % 5) * 0.75;
       canvas.drawCircle(
-        Offset(x, y),
+        Offset(x + math.sin(progress * math.pi * 2 + i) * 2.4, y),
         radius,
         Paint()
-          ..color = Colors.white.withValues(alpha: 0.44)
+          ..color = Colors.white.withValues(alpha: 0.52)
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 0.9,
-      );
-      canvas.drawCircle(
-        Offset(x - radius * 0.25, y - radius * 0.25),
-        math.max(0.45, radius * 0.22),
-        Paint()..color = Colors.white.withValues(alpha: 0.60),
+          ..strokeWidth = 1.1,
       );
     }
   }
 
   void _drawIce(Canvas canvas, Size size, RRect inner) {
+    if (fillLevel <= 0.04) return;
     for (var i = 0; i < 5; i++) {
       final ratio = (i + 1) / 6;
       final x = inner.left + inner.width * ratio;
-      final surfaceY = _surfaceAt(x, inner, size);
-      final y = surfaceY + 25 + (i % 2) * 24 + motionEnergy * (i - 2) * 4;
-
+      final y = _surfaceAt(x, inner, size) + (immersive ? 34 : 24) + (i % 2) * 22;
       canvas.save();
       canvas.translate(x, y);
-      canvas.rotate((i - 2) * 0.15 + surface[i * 5] * 0.004);
-      final cube = RRect.fromRectAndRadius(
-        const Rect.fromLTWH(-16, -16, 32, 32),
-        const Radius.circular(7),
+      canvas.rotate((i - 2) * 0.12 + motionEnergy * 0.18);
+      final cubeSize = immersive ? 34.0 : 27.0;
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromCenter(center: Offset.zero, width: cubeSize, height: cubeSize),
+        Radius.circular(cubeSize * 0.2),
       );
+      canvas.drawRRect(rect, Paint()..color = Colors.white.withValues(alpha: 0.15));
       canvas.drawRRect(
-        cube,
+        rect,
         Paint()
-          ..shader = const LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0x88FFFFFF), Color(0x18FFFFFF), Color(0x55BDEBFF)],
-          ).createShader(cube.outerRect),
-      );
-      canvas.drawRRect(
-        cube,
-        Paint()
-          ..color = Colors.white.withValues(alpha: 0.38)
+          ..color = Colors.white.withValues(alpha: 0.42)
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.2,
+          ..strokeWidth = 1.4,
       );
       canvas.restore();
     }
   }
 
-  void _drawLightRays(Canvas canvas, Size size, RRect inner) {
+  void _drawLiquidLight(Canvas canvas, Size size, RRect inner) {
+    if (fillLevel <= 0.015) return;
     final top = _baseTop(size);
-    for (var i = 0; i < 5; i++) {
-      final x = inner.left + 26 + i * 38.0;
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(
-          Rect.fromLTWH(x, top + 14, 9, inner.bottom - top - 36),
-          const Radius.circular(5),
-        ),
-        Paint()
-          ..color = Colors.white.withValues(alpha: 0.035 + (i % 2) * 0.018)
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5),
-      );
-    }
+    canvas.drawRect(
+      Rect.fromLTWH(inner.left, top, inner.width, inner.bottom - top),
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+          colors: [
+            Colors.white.withValues(alpha: 0.18),
+            Colors.transparent,
+            Colors.black.withValues(alpha: 0.14),
+          ],
+        ).createShader(inner.outerRect),
+    );
   }
 
   void _drawCondensation(Canvas canvas, RRect inner) {
-    for (var i = 0; i < 28; i++) {
-      final x = inner.left + 12 + ((i * 47) % 205).toDouble();
-      final y = inner.top + 25 + ((i * 73) % 310).toDouble();
-      final radius = 1.2 + (i % 4) * 0.72;
+    final count = immersive ? 42 : 18;
+    for (var i = 0; i < count; i++) {
+      final x = inner.left + 10 + ((i * 67) % 1000) / 1000 * (inner.width - 20);
+      final y = inner.top + 18 + ((i * 89) % 1000) / 1000 * (inner.height - 36);
+      final radius = 1.4 + (i % 4) * 0.65;
       canvas.drawCircle(
         Offset(x, y),
         radius,
-        Paint()..color = Colors.white.withValues(alpha: 0.14),
+        Paint()..color = Colors.white.withValues(alpha: 0.15),
       );
-      if (i % 6 == 0) {
-        canvas.drawLine(
-          Offset(x, y + radius),
-          Offset(x, y + radius + 6 + i % 10),
-          Paint()
-            ..color = Colors.white.withValues(alpha: 0.08)
-            ..strokeWidth = radius,
-        );
-      }
     }
   }
 
@@ -498,20 +531,13 @@ class DrinkGlassPainter extends CustomPainter {
     canvas.drawRRect(
       glass,
       Paint()
-        ..color = Colors.white.withValues(alpha: 0.33)
+        ..color = Colors.white.withValues(alpha: 0.35)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2.2,
     );
-    canvas.drawRRect(
-      glass.deflate(5),
-      Paint()
-        ..color = Colors.white.withValues(alpha: 0.09)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.1,
-    );
     canvas.drawLine(
-      Offset(body.left + 35, body.top + 39),
-      Offset(body.left + 35, body.bottom - 66),
+      Offset(body.left + 35, body.top + 42),
+      Offset(body.left + 35, body.bottom - 72),
       Paint()
         ..color = Colors.white.withValues(alpha: 0.30)
         ..strokeWidth = 8
@@ -522,25 +548,51 @@ class DrinkGlassPainter extends CustomPainter {
   void _drawBase(Canvas canvas, Size size) {
     canvas.drawRRect(
       RRect.fromRectAndRadius(
-        Rect.fromLTWH(51, size.height - 43, size.width - 102, 15),
+        Rect.fromLTWH(55, size.height - 43, size.width - 110, 14),
         const Radius.circular(8),
       ),
-      Paint()
-        ..shader = const LinearGradient(
-          colors: [Color(0x66FFFFFF), Color(0x10000000), Color(0x55FFFFFF)],
-        ).createShader(Rect.fromLTWH(51, size.height - 43, size.width - 102, 15)),
+      Paint()..color = Colors.white.withValues(alpha: 0.17),
+    );
+  }
+
+  void _drawFullscreenEdges(Canvas canvas, Size size) {
+    final edgePaint = Paint()
+      ..shader = const LinearGradient(
+        colors: [Color(0x88FFFFFF), Color(0x08FFFFFF), Color(0x66FFFFFF)],
+      ).createShader(Rect.fromLTWH(0, 0, size.width, size.height));
+    canvas.drawRect(Rect.fromLTWH(0, 0, 7, size.height), edgePaint);
+    canvas.drawRect(Rect.fromLTWH(size.width - 7, 0, 7, size.height), edgePaint);
+  }
+
+  void _drawEmptyMessage(Canvas canvas, Size size) {
+    final painter = TextPainter(
+      text: const TextSpan(
+        text: 'Verre vide\nTouchez pour resservir',
+        style: TextStyle(
+          color: Colors.white70,
+          fontSize: 18,
+          height: 1.45,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      textAlign: TextAlign.center,
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: size.width - 40);
+    painter.paint(
+      canvas,
+      Offset((size.width - painter.width) / 2, size.height * 0.43),
     );
   }
 
   @override
   bool shouldRepaint(covariant DrinkGlassPainter oldDelegate) {
     return oldDelegate.progress != progress ||
-        oldDelegate.drink != drink ||
         oldDelegate.surface != surface ||
         oldDelegate.motionEnergy != motionEnergy ||
         oldDelegate.foamEnergy != foamEnergy ||
         oldDelegate.fillLevel != fillLevel ||
-        oldDelegate.bubbles != bubbles ||
-        oldDelegate.condensation != condensation;
+        oldDelegate.immersive != immersive ||
+        oldDelegate.drinkAngle != drinkAngle ||
+        oldDelegate.drink != drink;
   }
 }
