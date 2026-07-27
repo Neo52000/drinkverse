@@ -90,12 +90,12 @@ abstract final class AppTheme {
         ),
         headlineSmall: const TextStyle(
           color: textPrimary,
-          fontWeight: FontWeight.w750,
+          fontWeight: FontWeight.w700,
           letterSpacing: -0.25,
         ),
         titleLarge: const TextStyle(
           color: textPrimary,
-          fontWeight: FontWeight.w750,
+          fontWeight: FontWeight.w700,
           letterSpacing: -0.2,
         ),
         titleMedium: const TextStyle(
@@ -115,7 +115,7 @@ abstract final class AppTheme {
           height: 1.35,
         ),
         labelLarge: const TextStyle(
-          fontWeight: FontWeight.w750,
+          fontWeight: FontWeight.w700,
           letterSpacing: 0.1,
         ),
       ),
