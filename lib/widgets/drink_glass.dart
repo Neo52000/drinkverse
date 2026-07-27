@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:sensors_plus/sensors_plus.dart';
 
 import '../models/drink.dart';
 
@@ -16,6 +18,13 @@ class DrinkGlass extends StatefulWidget {
 class _DrinkGlassState extends State<DrinkGlass>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
+  StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
+  StreamSubscription<GyroscopeEvent>? _gyroscopeSubscription;
+
+  double _tilt = 0;
+  double _targetTilt = 0;
+  double _motionEnergy = 0;
+  bool _sensorActive = false;
 
   @override
   void initState() {
@@ -23,37 +32,86 @@ class _DrinkGlassState extends State<DrinkGlass>
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 4),
-    )..repeat();
+    )
+      ..addListener(_updatePhysics)
+      ..repeat();
+    _startSensors();
+  }
+
+  void _startSensors() {
+    _accelerometerSubscription = accelerometerEventStream(
+      samplingPeriod: SensorInterval.gameInterval,
+    ).listen(
+      (event) {
+        _sensorActive = true;
+        _targetTilt = (event.x / 9.81).clamp(-1.0, 1.0);
+      },
+      onError: (_) {
+        _sensorActive = false;
+      },
+      cancelOnError: false,
+    );
+
+    _gyroscopeSubscription = gyroscopeEventStream(
+      samplingPeriod: SensorInterval.gameInterval,
+    ).listen(
+      (event) {
+        final angularVelocity =
+            (event.x.abs() + event.y.abs() + event.z.abs()).clamp(0.0, 8.0);
+        _motionEnergy = math.max(_motionEnergy, angularVelocity / 8.0);
+      },
+      onError: (_) {},
+      cancelOnError: false,
+    );
+  }
+
+  void _updatePhysics() {
+    if (!mounted) return;
+
+    final fallbackTilt = math.sin(_controller.value * math.pi * 2) * 0.04;
+    final desiredTilt = _sensorActive ? _targetTilt : fallbackTilt;
+
+    _tilt += (desiredTilt - _tilt) * 0.09;
+    _motionEnergy *= 0.965;
+    setState(() {});
   }
 
   @override
   void dispose() {
-    _controller.dispose();
+    _accelerometerSubscription?.cancel();
+    _gyroscopeSubscription?.cancel();
+    _controller
+      ..removeListener(_updatePhysics)
+      ..dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) {
-        return CustomPaint(
-          size: const Size(270, 390),
-          painter: DrinkGlassPainter(
-            drink: widget.drink,
-            progress: _controller.value,
-          ),
-        );
-      },
+    return CustomPaint(
+      size: const Size(270, 390),
+      painter: DrinkGlassPainter(
+        drink: widget.drink,
+        progress: _controller.value,
+        tilt: _tilt,
+        motionEnergy: _motionEnergy,
+      ),
     );
   }
 }
 
 class DrinkGlassPainter extends CustomPainter {
-  DrinkGlassPainter({required this.drink, required this.progress});
+  DrinkGlassPainter({
+    required this.drink,
+    required this.progress,
+    required this.tilt,
+    required this.motionEnergy,
+  });
 
   final Drink drink;
   final double progress;
+  final double tilt;
+  final double motionEnergy;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -83,14 +141,29 @@ class DrinkGlassPainter extends CustomPainter {
     canvas.clipRRect(glassRect.deflate(8));
 
     final liquidTop = size.height * 0.29;
-    final liquidPath = Path()..moveTo(30, liquidTop);
-    const segments = 40;
+    final halfWidth = (size.width - 60) / 2;
+    final slopePixels = tilt * 44;
+    final waveStrength = 5.5 + motionEnergy * 17;
+    final liquidPath = Path();
+    const segments = 48;
+
     for (var i = 0; i <= segments; i++) {
-      final x = 30 + (size.width - 60) * i / segments;
-      final primary = math.sin(i / segments * math.pi * 2 + progress * math.pi * 2) * 7;
-      final secondary = math.sin(i / segments * math.pi * 4 - progress * math.pi * 3) * 2.5;
-      liquidPath.lineTo(x, liquidTop + primary + secondary);
+      final ratio = i / segments;
+      final x = 30 + (size.width - 60) * ratio;
+      final slope = ((x - size.width / 2) / halfWidth) * slopePixels;
+      final primary =
+          math.sin(ratio * math.pi * 2 + progress * math.pi * 2) * waveStrength;
+      final secondary =
+          math.sin(ratio * math.pi * 4 - progress * math.pi * 3) *
+              (2.2 + motionEnergy * 6);
+      final y = liquidTop + slope + primary + secondary;
+      if (i == 0) {
+        liquidPath.moveTo(x, y);
+      } else {
+        liquidPath.lineTo(x, y);
+      }
     }
+
     liquidPath
       ..lineTo(size.width - 30, size.height - 34)
       ..lineTo(30, size.height - 34)
@@ -107,40 +180,51 @@ class DrinkGlassPainter extends CustomPainter {
             drink.color,
             Color.lerp(drink.color, Colors.black, 0.38)!,
           ],
-        ).createShader(Rect.fromLTWH(30, liquidTop, size.width - 60, size.height - liquidTop)),
+        ).createShader(
+          Rect.fromLTWH(30, liquidTop - 50, size.width - 60, size.height - liquidTop + 50),
+        ),
     );
 
     if (drink.foam) {
-      final foamPaint = Paint()..color = const Color(0xFFF5E2BE).withValues(alpha: 0.9);
-      for (var i = 0; i < 18; i++) {
-        final x = 36 + (i * 13.1) % (size.width - 72);
-        final y = liquidTop - 2 + math.sin(i * 1.7) * 4;
+      final foamPaint = Paint()
+        ..color = const Color(0xFFF5E2BE).withValues(alpha: 0.92);
+      for (var i = 0; i < 20; i++) {
+        final x = 36 + (i * 12.4) % (size.width - 72);
+        final normalizedX = (x - size.width / 2) / halfWidth;
+        final foamSlope = normalizedX * slopePixels;
+        final foamWave =
+            math.sin(i * 1.7 + progress * math.pi * 2) * (3 + motionEnergy * 4);
+        final y = liquidTop - 2 + foamSlope + foamWave;
         canvas.drawCircle(Offset(x, y), 5 + i % 3, foamPaint);
       }
     }
 
     if (drink.ice) {
       final icePaint = Paint()
-        ..color = Colors.white.withValues(alpha: 0.18)
+        ..color = Colors.white.withValues(alpha: 0.2)
         ..style = PaintingStyle.fill;
       for (var i = 0; i < 4; i++) {
-        final x = 58 + i * 37.0;
-        final y = liquidTop + 38 + (i % 2) * 32.0;
+        final x = 58 + i * 37.0 + tilt * (i - 1.5) * 10;
+        final y = liquidTop + 42 + (i % 2) * 34.0 + motionEnergy * 6;
         canvas.save();
         canvas.translate(x, y);
-        canvas.rotate((i - 1.5) * 0.13);
+        canvas.rotate((i - 1.5) * 0.13 + tilt * 0.35);
         canvas.drawRRect(
-          RRect.fromRectAndRadius(const Rect.fromLTWH(-14, -14, 28, 28), const Radius.circular(6)),
+          RRect.fromRectAndRadius(
+            const Rect.fromLTWH(-14, -14, 28, 28),
+            const Radius.circular(6),
+          ),
           icePaint,
         );
         canvas.restore();
       }
     }
 
-    final bubblePaint = Paint()..color = Colors.white.withValues(alpha: 0.55);
-    for (var i = 0; i < 18; i++) {
-      final x = 48 + ((i * 41) % 165).toDouble();
-      final cycle = (progress + i * 0.057) % 1;
+    final bubblePaint = Paint()..color = Colors.white.withValues(alpha: 0.58);
+    final bubbleCount = 18 + (motionEnergy * 10).round();
+    for (var i = 0; i < bubbleCount; i++) {
+      final x = 46 + ((i * 41) % 168).toDouble() + tilt * 8;
+      final cycle = (progress * (1 + motionEnergy) + i * 0.057) % 1;
       final y = size.height - 46 - cycle * (size.height - liquidTop - 62);
       canvas.drawCircle(Offset(x, y), 1.8 + i % 4, bubblePaint);
     }
@@ -153,6 +237,16 @@ class DrinkGlassPainter extends CustomPainter {
         ..strokeWidth = 9
         ..strokeCap = StrokeCap.round,
     );
+
+    for (var i = 0; i < 16; i++) {
+      final dx = 45 + ((i * 31) % 175).toDouble();
+      final dy = 38 + ((i * 53) % 250).toDouble();
+      canvas.drawCircle(
+        Offset(dx, dy),
+        1.8 + (i % 3),
+        Paint()..color = Colors.white.withValues(alpha: 0.16),
+      );
+    }
 
     canvas.restore();
 
@@ -167,6 +261,9 @@ class DrinkGlassPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant DrinkGlassPainter oldDelegate) {
-    return oldDelegate.progress != progress || oldDelegate.drink != drink;
+    return oldDelegate.progress != progress ||
+        oldDelegate.drink != drink ||
+        oldDelegate.tilt != tilt ||
+        oldDelegate.motionEnergy != motionEnergy;
   }
 }
