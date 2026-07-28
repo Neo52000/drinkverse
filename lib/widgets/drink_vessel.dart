@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
 
 import '../models/drink.dart';
-import 'drink_glass_v2.dart';
+import 'drink_glass.dart';
 
-/// Encadre le moteur de liquide dans une silhouette de verre propre à chaque
-/// boisson. Le rendu interne applique désormais un profil physique spécifique
-/// selon la catégorie de boisson.
+/// Encadre le moteur de liquide historique, plus fiable pour les capteurs et
+/// le vidage, dans une silhouette propre à chaque boisson.
 class DrinkVessel extends StatelessWidget {
   const DrinkVessel({
     super.key,
@@ -42,7 +41,7 @@ class DrinkVessel extends StatelessWidget {
               child: SizedBox(
                 width: width,
                 height: height,
-                child: DrinkGlassV2(
+                child: DrinkGlass(
                   drink: drink,
                   fillLevel: fillLevel,
                   bubbles: bubbles,
