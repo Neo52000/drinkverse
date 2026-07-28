@@ -29,8 +29,9 @@ class DrinkGlass extends StatefulWidget {
 
 class _DrinkGlassState extends State<DrinkGlass>
     with SingleTickerProviderStateMixin {
-  static const int _pointCount = 55;
+  static const int _pointCount = 96;
   static const double _gravity = 9.81;
+  static const int _subSteps = 3;
 
   late final AnimationController _controller;
   late final List<double> _surface;
@@ -45,11 +46,13 @@ class _DrinkGlassState extends State<DrinkGlass>
   double _liquidTilt = 0;
   double _liquidTiltVelocity = 0;
   double _gyroRollRate = 0;
+  double _gyroYawRate = 0;
   double _gyroMagnitude = 0;
   double _lastGyroMagnitude = 0;
   double _drinkAngle = 0;
   double _motionEnergy = 0;
   double _foamEnergy = 0;
+  double _vortexEnergy = 0;
   double _displayFill = 0.72;
   double _initialFill = 0.72;
   double _residue = 0;
@@ -95,7 +98,7 @@ class _DrinkGlassState extends State<DrinkGlass>
       (event) {
         _sensorActive = true;
         final horizontal = (event.x / _gravity).clamp(-1.0, 1.0).toDouble();
-        _accelerometerTilt = horizontal.abs() < 0.018 ? 0 : horizontal;
+        _accelerometerTilt = horizontal.abs() < 0.015 ? 0 : horizontal;
 
         final vertical = (event.y.abs() / _gravity).clamp(0.0, 1.0).toDouble();
         _drinkAngle = (1 - vertical).clamp(0.0, 1.0).toDouble();
@@ -108,30 +111,37 @@ class _DrinkGlassState extends State<DrinkGlass>
       samplingPeriod: SensorInterval.gameInterval,
     ).listen(
       (event) {
-        _gyroRollRate = (event.z * 0.88 + event.y * 0.12)
-            .clamp(-10.0, 10.0)
+        _gyroRollRate = (event.z * 0.86 + event.y * 0.14)
+            .clamp(-11.0, 11.0)
             .toDouble();
+        _gyroYawRate = event.x.clamp(-11.0, 11.0).toDouble();
+
         final magnitude = math.sqrt(
           event.x * event.x + event.y * event.y + event.z * event.z,
-        ).clamp(0.0, 18.0).toDouble();
+        ).clamp(0.0, 20.0).toDouble();
         final impulse = (magnitude - _lastGyroMagnitude).abs();
         _lastGyroMagnitude = magnitude;
         _gyroMagnitude = magnitude;
 
-        final normalized = (magnitude / 7.0).clamp(0.0, 1.0).toDouble();
+        final normalized = (magnitude / 7.5).clamp(0.0, 1.0).toDouble();
         _motionEnergy = math.max(_motionEnergy, normalized);
         _foamEnergy = math.max(
           _foamEnergy,
-          (normalized * 1.18).clamp(0.0, 1.0).toDouble(),
+          (normalized * 1.16).clamp(0.0, 1.0).toDouble(),
         );
 
-        final lateral = (event.y * 0.72 + event.z * 0.48)
-            .clamp(-8.0, 8.0)
+        final circularMotion = (event.x.abs() * event.z.abs() / 18)
+            .clamp(0.0, 1.0)
             .toDouble();
-        _injectImpulse(lateral * 0.34, event.x);
+        _vortexEnergy = math.max(_vortexEnergy, circularMotion);
 
-        if ((widget.drink.ice && impulse > 1.15) ||
-            (widget.drink.foam && impulse > 1.95)) {
+        final lateral = (event.y * 0.70 + event.z * 0.52)
+            .clamp(-9.0, 9.0)
+            .toDouble();
+        _injectImpulse(lateral * 0.32, event.x);
+
+        if ((widget.drink.ice && impulse > 1.1) ||
+            (widget.drink.foam && impulse > 1.9)) {
           _playMotionFeedback();
         }
       },
@@ -144,7 +154,7 @@ class _DrinkGlassState extends State<DrinkGlass>
     final center = lateralAxis >= 0 ? _pointCount * 2 ~/ 3 : _pointCount ~/ 3;
     for (var i = 0; i < _pointCount; i++) {
       final distance = (i - center).abs();
-      final influence = math.exp(-distance * distance / 46);
+      final influence = math.exp(-distance * distance / 110);
       _velocity[i] += strength * influence;
     }
   }
@@ -157,61 +167,93 @@ class _DrinkGlassState extends State<DrinkGlass>
     HapticFeedback.lightImpact();
   }
 
+  ({double propagation, double spring, double damping}) get _liquidProfile {
+    return switch (widget.drink.glassType) {
+      GlassType.pint => (propagation: 39.0, spring: 15.0, damping: 3.7),
+      GlassType.highball => (propagation: 43.0, spring: 16.5, damping: 3.45),
+      GlassType.cocktail => (propagation: 35.0, spring: 13.5, damping: 4.15),
+      GlassType.mug => (propagation: 31.0, spring: 12.5, damping: 4.5),
+    };
+  }
+
   void _stepPhysics() {
     if (!mounted || widget.paused) return;
-    const dt = 1 / 60;
+    const frameDt = 1 / 60;
 
-    final fallback = math.sin(_controller.value * math.pi * 2) * 0.009;
+    final fallback = math.sin(_controller.value * math.pi * 2) * 0.008;
     if (_sensorActive) {
-      final predicted = _fusedTilt + _gyroRollRate * dt * 0.31;
-      _fusedTilt = (predicted * 0.92 + _accelerometerTilt * 0.08)
-          .clamp(-1.15, 1.15)
+      final predicted = _fusedTilt + _gyroRollRate * frameDt * 0.34;
+      _fusedTilt = (predicted * 0.935 + _accelerometerTilt * 0.065)
+          .clamp(-1.2, 1.2)
           .toDouble();
     } else {
       _fusedTilt = fallback;
     }
 
-    final stiffness = 37.0 + _gyroMagnitude.clamp(0.0, 6.0) * 1.5;
-    const damping = 7.2;
-    final acceleration =
+    final fillMass = 0.55 + _displayFill * 0.85;
+    final stiffness = (41.0 + _gyroMagnitude.clamp(0.0, 7.0) * 1.4) / fillMass;
+    final damping = 7.0 + fillMass * 0.65;
+    final tiltAcceleration =
         (_fusedTilt - _liquidTilt) * stiffness - _liquidTiltVelocity * damping;
-    _liquidTiltVelocity += acceleration * dt;
-    _liquidTilt += _liquidTiltVelocity * dt;
+    _liquidTiltVelocity += tiltAcceleration * frameDt;
+    _liquidTilt += _liquidTiltVelocity * frameDt;
 
-    final activity = (_motionEnergy * 0.75 + _gyroMagnitude / 18)
+    final profile = _liquidProfile;
+    final activity = (_motionEnergy * 0.72 + _gyroMagnitude / 20)
         .clamp(0.0, 1.0)
         .toDouble();
-    final neighborStrength = 31.0 + activity * 13.0;
-    final springStrength = 15.5 + activity * 4.5;
-    final surfaceDamping = 3.65 + (1 - activity) * 0.85;
+    final dt = frameDt / _subSteps;
 
-    for (var i = 0; i < _pointCount; i++) {
-      final normalizedX = i / (_pointCount - 1) * 2 - 1;
-      final equilibrium = normalizedX * _liquidTilt * 62;
-      final left = i == 0 ? _surface[1] : _surface[i - 1];
-      final right = i == _pointCount - 1 ? _surface[_pointCount - 2] : _surface[i + 1];
-      final neighborForce =
-          (left + right - 2 * _surface[i]) * neighborStrength;
-      final springForce = (equilibrium - _surface[i]) * springStrength;
-      final dampingForce = -_velocity[i] * surfaceDamping;
-      _velocity[i] += (neighborForce + springForce + dampingForce) * dt;
-      _nextSurface[i] = (_surface[i] + _velocity[i] * dt)
-          .clamp(-110.0, 110.0)
-          .toDouble();
+    for (var subStep = 0; subStep < _subSteps; subStep++) {
+      final propagation = profile.propagation + activity * 12;
+      final spring = profile.spring + activity * 4;
+      final dampingSurface = profile.damping + (1 - activity) * 0.55;
+      final waveScale = 66.0 / fillMass;
+
+      for (var i = 0; i < _pointCount; i++) {
+        final normalizedX = i / (_pointCount - 1) * 2 - 1;
+        final vortex = math.sin(normalizedX * math.pi * 2 +
+                _controller.value * math.pi * 4 + _gyroYawRate * 0.08) *
+            _vortexEnergy *
+            8;
+        final equilibrium = normalizedX * _liquidTilt * waveScale + vortex;
+
+        final left = i == 0 ? _surface[1] : _surface[i - 1];
+        final right = i == _pointCount - 1
+            ? _surface[_pointCount - 2]
+            : _surface[i + 1];
+        final laplacian = left + right - 2 * _surface[i];
+        final neighborForce = laplacian * propagation;
+        final springForce = (equilibrium - _surface[i]) * spring;
+        final dampingForce = -_velocity[i] * dampingSurface;
+
+        _velocity[i] +=
+            (neighborForce + springForce + dampingForce) * dt;
+        _nextSurface[i] = (_surface[i] + _velocity[i] * dt)
+            .clamp(-125.0, 125.0)
+            .toDouble();
+      }
+
+      for (var i = 0; i < _pointCount; i++) {
+        _surface[i] = _nextSurface[i];
+      }
+
+      _velocity[0] *= 0.82;
+      _velocity[_pointCount - 1] *= 0.82;
     }
 
-    for (var i = 0; i < _pointCount; i++) {
-      _surface[i] = _nextSurface[i];
-    }
+    _updatePouring(frameDt);
 
-    _updatePouring(dt);
-
-    _motionEnergy *= 0.974;
+    _motionEnergy *= 0.975;
     _foamEnergy *= 0.988;
+    _vortexEnergy *= 0.965;
     _gyroMagnitude *= 0.93;
     _gyroRollRate *= 0.91;
+    _gyroYawRate *= 0.92;
+
     if (_motionEnergy < 0.001) _motionEnergy = 0;
     if (_foamEnergy < 0.001) _foamEnergy = 0;
+    if (_vortexEnergy < 0.001) _vortexEnergy = 0;
 
     setState(() {});
   }
@@ -220,18 +262,19 @@ class _DrinkGlassState extends State<DrinkGlass>
     _pouring = false;
     if (!_immersive || _displayFill <= 0) return;
 
-    final pourFactor = ((_drinkAngle - 0.50) / 0.50)
+    final threshold = 0.48 + _displayFill * 0.05;
+    final pourFactor = ((_drinkAngle - threshold) / (1 - threshold))
         .clamp(0.0, 1.0)
         .toDouble();
     _pouring = pourFactor > 0.025;
 
     if (_pouring) {
-      final flowRate = 0.038 + math.pow(pourFactor, 1.38) * 0.34;
+      final flowRate = 0.035 + math.pow(pourFactor, 1.42) * 0.35;
       _displayFill = (_displayFill - flowRate * dt)
           .clamp(0.0, 0.98)
           .toDouble();
-      _motionEnergy = math.max(_motionEnergy, 0.28 + pourFactor * 0.62);
-      _foamEnergy = math.max(_foamEnergy, 0.20 + pourFactor * 0.44);
+      _motionEnergy = math.max(_motionEnergy, 0.27 + pourFactor * 0.64);
+      _foamEnergy = math.max(_foamEnergy, 0.18 + pourFactor * 0.46);
       _residue = math.max(
         _residue,
         ((_initialFill - _displayFill) / math.max(_initialFill, 0.01))
@@ -240,7 +283,7 @@ class _DrinkGlassState extends State<DrinkGlass>
       );
 
       final edge = _liquidTilt >= 0 ? _pointCount - 1 : 0;
-      _velocity[edge] += (_liquidTilt >= 0 ? 1 : -1) * pourFactor * 0.62;
+      _velocity[edge] += (_liquidTilt >= 0 ? 1 : -1) * pourFactor * 0.72;
     }
 
     if (_pouring && !_wasPouring) HapticFeedback.selectionClick();
@@ -299,6 +342,7 @@ class _DrinkGlassState extends State<DrinkGlass>
                   surface: List<double>.unmodifiable(_surface),
                   motionEnergy: _motionEnergy,
                   foamEnergy: _foamEnergy,
+                  vortexEnergy: _vortexEnergy,
                   fillLevel: _displayFill,
                   bubbles: widget.bubbles,
                   condensation: widget.condensation,
@@ -324,6 +368,7 @@ class DrinkGlassPainter extends CustomPainter {
     required this.surface,
     required this.motionEnergy,
     required this.foamEnergy,
+    required this.vortexEnergy,
     required this.fillLevel,
     required this.bubbles,
     required this.condensation,
@@ -339,6 +384,7 @@ class DrinkGlassPainter extends CustomPainter {
   final List<double> surface;
   final double motionEnergy;
   final double foamEnergy;
+  final double vortexEnergy;
   final double fillLevel;
   final bool bubbles;
   final bool condensation;
@@ -406,19 +452,28 @@ class DrinkGlassPainter extends CustomPainter {
     final scale = immersive ? (size.width / 286).clamp(0.85, 1.75) : 1.0;
     final microWave =
         math.sin(ratio * math.pi * 8 + progress * math.pi * 2.7) *
-            (0.45 + motionEnergy * 2.6) *
+            (0.35 + motionEnergy * 2.4) *
             scale;
     final secondary =
         math.sin(ratio * math.pi * 3.4 - progress * math.pi * 1.7) *
             motionEnergy *
-            1.8 *
+            1.6 *
             scale;
-    return _baseTop(size) + displacement * scale + microWave + secondary;
+    final vortexRipple =
+        math.sin(ratio * math.pi * 5.5 + progress * math.pi * 4.2) *
+            vortexEnergy *
+            2.2 *
+            scale;
+    return _baseTop(size) +
+        displacement * scale +
+        microWave +
+        secondary +
+        vortexRipple;
   }
 
   Path _liquidPath(Size size, RRect inner) {
     final path = Path();
-    const segments = 120;
+    const segments = 160;
     for (var i = 0; i <= segments; i++) {
       final x = inner.left + inner.width * i / segments;
       final y = _surfaceAt(x, inner, size);
@@ -466,7 +521,7 @@ class DrinkGlassPainter extends CustomPainter {
     );
 
     final surfacePath = Path();
-    const segments = 120;
+    const segments = 160;
     for (var i = 0; i <= segments; i++) {
       final x = inner.left + inner.width * i / segments;
       final y = _surfaceAt(x, inner, size);
@@ -515,7 +570,10 @@ class DrinkGlassPainter extends CustomPainter {
       final path = Path()..moveTo(inner.left + 6, y);
       for (var s = 1; s <= 36; s++) {
         final x = inner.left + 6 + (inner.width - 12) * s / 36;
-        path.lineTo(x, y + math.sin(s * 0.68 + i * 1.7) * (1.1 + residue * 2.2));
+        path.lineTo(
+          x,
+          y + math.sin(s * 0.68 + i * 1.7) * (1.1 + residue * 2.2),
+        );
       }
       canvas.drawPath(path, paint);
     }
@@ -552,7 +610,9 @@ class DrinkGlassPainter extends CustomPainter {
       final y = _surfaceAt(x, inner, size) + (immersive ? 30 : 22) + (i % 2) * 20;
       canvas.save();
       canvas.translate(x, y);
-      canvas.rotate((i - 2) * 0.12 + tilt * 0.16 + motionEnergy * 0.14);
+      canvas.rotate(
+        (i - 2) * 0.12 + tilt * 0.16 + motionEnergy * 0.14 + vortexEnergy * 0.2,
+      );
       final cubeSize = immersive ? 33.0 : 26.0;
       final rect = RRect.fromRectAndRadius(
         Rect.fromCenter(center: Offset.zero, width: cubeSize, height: cubeSize),
@@ -672,6 +732,7 @@ class DrinkGlassPainter extends CustomPainter {
         oldDelegate.surface != surface ||
         oldDelegate.motionEnergy != motionEnergy ||
         oldDelegate.foamEnergy != foamEnergy ||
+        oldDelegate.vortexEnergy != vortexEnergy ||
         oldDelegate.fillLevel != fillLevel ||
         oldDelegate.immersive != immersive ||
         oldDelegate.drinkAngle != drinkAngle ||
