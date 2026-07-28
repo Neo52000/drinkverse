@@ -5,6 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
 import '../models/drink.dart';
+import '../physics/fluid_solver.dart';
+import '../physics/gravity_engine.dart';
+import '../physics/pour_engine.dart';
 import 'drink_glass.dart';
 
 class DrinkVessel extends StatefulWidget {
@@ -18,7 +21,7 @@ class DrinkVessel extends StatefulWidget {
   });
 
   static const String debugVersion =
-      'DEV • PHYSICS V6.0 • SCREEN IS THE GLASS';
+      'DEV • PHYSICS V7.0 • REFACTORED ENGINES';
 
   final Drink drink;
   final double fillLevel;
@@ -32,12 +35,10 @@ class DrinkVessel extends StatefulWidget {
 
 class _DrinkVesselState extends State<DrinkVessel>
     with SingleTickerProviderStateMixin {
-  static const int _columns = 64;
-
   late final AnimationController _controller;
-  late final List<double> _height;
-  late final List<double> _velocity;
-  late final List<double> _next;
+  late final FluidSolver _fluid;
+  late final PourEngine _pourEngine;
+  final GravityEngine _gravityEngine = const GravityEngine();
 
   StreamSubscription<AccelerometerEvent>? _accelerometer;
   StreamSubscription<GyroscopeEvent>? _gyroscope;
@@ -45,16 +46,7 @@ class _DrinkVesselState extends State<DrinkVessel>
   double _gravityX = 0;
   double _gravityY = 1;
   double _targetSlope = 0;
-  double _slope = 0;
-  double _slopeVelocity = 0;
-  double _rotationImpulse = 0;
-  double _motionEnergy = 0;
   double _pour = 0;
-  double _flow = 0;
-  double _displayFill = 0.72;
-  double _initialFill = 0.72;
-  double _foam = 0.085;
-  double _residue = 0;
   Duration _lastElapsed = Duration.zero;
 
   bool get _screenGlassMode => widget.drink.foam;
@@ -62,11 +54,8 @@ class _DrinkVesselState extends State<DrinkVessel>
   @override
   void initState() {
     super.initState();
-    _displayFill = widget.fillLevel;
-    _initialFill = widget.fillLevel;
-    _height = List<double>.filled(_columns, 0);
-    _velocity = List<double>.filled(_columns, 0);
-    _next = List<double>.filled(_columns, 0);
+    _fluid = FluidSolver(columns: 64);
+    _pourEngine = PourEngine(widget.fillLevel);
     _controller = AnimationController.unbounded(vsync: this)
       ..addListener(_tick)
       ..repeat(min: 0, max: 1, period: const Duration(seconds: 1));
@@ -78,63 +67,35 @@ class _DrinkVesselState extends State<DrinkVessel>
     super.didUpdateWidget(oldWidget);
     if (oldWidget.drink != widget.drink) {
       _reset();
-    } else if (oldWidget.fillLevel != widget.fillLevel && _flow < 0.01) {
-      _displayFill = widget.fillLevel;
-      _initialFill = widget.fillLevel;
+    } else if (oldWidget.fillLevel != widget.fillLevel) {
+      _pourEngine.syncFill(widget.fillLevel);
     }
   }
 
   void _reset() {
-    _displayFill = widget.fillLevel;
-    _initialFill = widget.fillLevel;
-    _foam = 0.085;
-    _residue = 0;
-    _flow = 0;
-    _slope = 0;
-    _slopeVelocity = 0;
-    for (var i = 0; i < _columns; i++) {
-      _height[i] = 0;
-      _velocity[i] = 0;
-    }
+    _fluid.reset();
+    _pourEngine.reset(widget.fillLevel);
   }
 
   void _startSensors() {
     _accelerometer = accelerometerEventStream(
       samplingPeriod: SensorInterval.gameInterval,
     ).listen((event) {
-      final magnitude = math.sqrt(
-        event.x * event.x + event.y * event.y + event.z * event.z,
+      final sample = _gravityEngine.fromAccelerometer(
+        event.x,
+        event.y,
+        event.z,
       );
-      if (magnitude > 0.1) {
-        _gravityX = (event.x / magnitude).clamp(-1.0, 1.0).toDouble();
-        _gravityY = (event.y / magnitude).clamp(-1.0, 1.0).toDouble();
-        _targetSlope = (_gravityX / math.max(_gravityY.abs(), 0.22))
-            .clamp(-1.35, 1.35)
-            .toDouble();
-        _pour = (1 - _gravityY.abs()).clamp(0.0, 1.0).toDouble();
-      }
+      _gravityX = sample.x;
+      _gravityY = sample.y;
+      _targetSlope = sample.slope;
+      _pour = sample.pour;
     }, onError: (_) {});
 
     _gyroscope = gyroscopeEventStream(
       samplingPeriod: SensorInterval.gameInterval,
     ).listen((event) {
-      _rotationImpulse = (event.z * 0.88 + event.y * 0.12)
-          .clamp(-14.0, 14.0)
-          .toDouble();
-      final energy = math.sqrt(
-        event.x * event.x + event.y * event.y + event.z * event.z,
-      );
-      _motionEnergy = math.max(
-        _motionEnergy,
-        (energy / 7.0).clamp(0.0, 1.0).toDouble(),
-      );
-
-      final center = event.x >= 0 ? _columns * 3 ~/ 4 : _columns ~/ 4;
-      final impulse = (event.y * 0.72 + event.z * 0.28).clamp(-9.0, 9.0);
-      for (var i = 0; i < _columns; i++) {
-        final distance = i - center;
-        _velocity[i] += impulse * math.exp(-(distance * distance) / 90) * 0.032;
-      }
+      _fluid.applyGyroscope(event.x, event.y, event.z);
     }, onError: (_) {});
   }
 
@@ -145,84 +106,23 @@ class _DrinkVesselState extends State<DrinkVessel>
     _lastElapsed = elapsed;
     if (dt <= 0 || dt > 0.05) dt = 1 / 60;
 
-    if (_screenGlassMode) {
-      _stepScreenFluid(dt);
-      _stepPour(dt);
-      setState(() {});
+    if (!_screenGlassMode) return;
+
+    _pourEngine.step(dt: dt, pour: _pour);
+    if (_pourEngine.flow > 0.012) {
+      _fluid.addPourEnergy(_pourEngine.flow);
     }
-  }
-
-  void _stepScreenFluid(double dt) {
-    final slopeAcceleration = (_targetSlope - _slope) * 28 -
-        _slopeVelocity * 6.4 +
-        _rotationImpulse * 0.16;
-    _slopeVelocity += slopeAcceleration * dt;
-    _slope += _slopeVelocity * dt;
-    _slope = _slope.clamp(-1.45, 1.45).toDouble();
-
-    const substeps = 6;
-    final step = dt / substeps;
-    for (var s = 0; s < substeps; s++) {
-      for (var i = 0; i < _columns; i++) {
-        final x = i / (_columns - 1) * 2 - 1;
-        final left = _height[i == 0 ? 1 : i - 1];
-        final right = _height[i == _columns - 1 ? _columns - 2 : i + 1];
-        final laplacian = left + right - 2 * _height[i];
-        final equilibrium = x * _slope * 0.42;
-        final travellingWave = math.sin(
-              i * 0.34 - _controller.value * math.pi * 4.8,
-            ) *
-            _motionEnergy *
-            0.006;
-        final wallPressure = -_slopeVelocity * x * x.abs() * 0.045;
-        final force = laplacian * 96 +
-            (equilibrium - _height[i]) * 34 -
-            _velocity[i] * (7.4 - _motionEnergy * 1.9) +
-            travellingWave +
-            wallPressure;
-        _velocity[i] += force * step;
-        _next[i] = _height[i] + _velocity[i] * step;
-      }
-
-      final mean = _next.reduce((a, b) => a + b) / _columns;
-      for (var i = 0; i < _columns; i++) {
-        _height[i] = (_next[i] - mean).clamp(-0.62, 0.62).toDouble();
-      }
-      _velocity.first *= 0.38;
-      _velocity.last *= 0.38;
-    }
-
-    final foamTarget = 0.082 + _motionEnergy * 0.12 + _flow * 0.055;
-    _foam += (foamTarget - _foam) * dt * (_motionEnergy > 0.16 ? 2.6 : 0.28);
-    _foam = _foam.clamp(0.06, 0.22).toDouble();
-    _motionEnergy *= math.pow(0.032, dt).toDouble();
-    _rotationImpulse *= math.pow(0.055, dt).toDouble();
-  }
-
-  void _stepPour(double dt) {
-    if (_displayFill <= 0.001) {
-      _flow += (0 - _flow) * dt * 9;
-      return;
-    }
-
-    final threshold = 0.58 - _displayFill * 0.13;
-    final requested = ((_pour - threshold) / (1 - threshold))
-        .clamp(0.0, 1.0)
-        .toDouble();
-    _flow += (requested - _flow) * dt * (requested > _flow ? 11 : 5.5);
-    _flow = _flow.clamp(0.0, 1.0).toDouble();
-
-    if (_flow <= 0.012) return;
-    final rate = 0.03 + _flow * _flow * 0.54;
-    _displayFill = (_displayFill - rate * dt).clamp(0.0, 0.98).toDouble();
-    _motionEnergy = math.max(_motionEnergy, 0.24 + _flow * 0.56);
-    _residue = ((_initialFill - _displayFill) / math.max(_initialFill, 0.01))
-        .clamp(0.0, 1.0)
-        .toDouble();
+    _fluid.step(
+      dt: dt,
+      targetSlope: _targetSlope,
+      flow: _pourEngine.flow,
+      progress: _controller.value,
+    );
+    setState(() {});
   }
 
   void _refill() {
-    if (!_screenGlassMode || _displayFill > 0.02) return;
+    if (!_screenGlassMode || _pourEngine.displayFill > 0.02) return;
     setState(_reset);
   }
 
@@ -263,13 +163,13 @@ class _DrinkVesselState extends State<DrinkVessel>
                 CustomPaint(
                   painter: _ScreenGlassPainter(
                     drink: widget.drink,
-                    columns: List<double>.unmodifiable(_height),
-                    fillLevel: _displayFill,
-                    foamDepth: _foam,
-                    energy: _motionEnergy,
-                    residue: _residue,
-                    flow: _flow,
-                    slope: _slope,
+                    columns: List<double>.unmodifiable(_fluid.height),
+                    fillLevel: _pourEngine.displayFill,
+                    foamDepth: _fluid.foam,
+                    energy: _fluid.motionEnergy,
+                    residue: _pourEngine.residue,
+                    flow: _pourEngine.flow,
+                    slope: _fluid.slope,
                     gravityX: _gravityX,
                     gravityY: _gravityY,
                     progress: _controller.value,
@@ -288,7 +188,9 @@ class _DrinkVesselState extends State<DrinkVessel>
                   ),
                 ),
               if (_screenGlassMode)
-                const IgnorePointer(child: CustomPaint(painter: _ScreenEdgePainter())),
+                const IgnorePointer(
+                  child: CustomPaint(painter: _ScreenEdgePainter()),
+                ),
               const Positioned(
                 top: 12,
                 right: 12,
@@ -336,8 +238,8 @@ class _ScreenGlassPainter extends CustomPainter {
     final b = math.min(a + 1, columns.length - 1);
     final local = index - a;
     final displacement = columns[a] * (1 - local) + columns[b] * local;
-    final base = size.height * (1 - fillLevel.clamp(0.0, 1.0));
-    return base + displacement * size.height * 0.44;
+    return size.height * (1 - fillLevel.clamp(0.0, 1.0)) +
+        displacement * size.height * 0.44;
   }
 
   Path _surfaceLine(Size size, {double offset = 0, double roughness = 0}) {
@@ -365,7 +267,7 @@ class _ScreenGlassPainter extends CustomPainter {
     );
 
     if (fillLevel <= 0.001) {
-      final tp = TextPainter(
+      final text = TextPainter(
         text: const TextSpan(
           text: 'Verre vide\nTouchez l’écran pour resservir',
           style: TextStyle(
@@ -378,7 +280,7 @@ class _ScreenGlassPainter extends CustomPainter {
         textAlign: TextAlign.center,
         textDirection: TextDirection.ltr,
       )..layout(maxWidth: size.width - 40);
-      tp.paint(canvas, Offset((size.width - tp.width) / 2, size.height * 0.42));
+      text.paint(canvas, Offset((size.width - text.width) / 2, size.height * 0.42));
       return;
     }
 
@@ -403,23 +305,6 @@ class _ScreenGlassPainter extends CustomPainter {
         ).createShader(Offset.zero & size),
     );
 
-    final glow = _surfaceLine(size, offset: size.height * 0.015)
-      ..lineTo(size.width, size.height * 0.56)
-      ..lineTo(0, size.height * 0.56)
-      ..close();
-    canvas.drawPath(
-      glow,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            Colors.white.withValues(alpha: 0.20),
-            Colors.transparent,
-          ],
-        ).createShader(Offset.zero & size),
-    );
-
     final foamPx = size.height * foamDepth;
     final foam = _surfaceLine(
       size,
@@ -437,7 +322,6 @@ class _ScreenGlassPainter extends CustomPainter {
         ..shader = const LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          stops: [0, 0.35, 0.78, 1],
           colors: [
             Color(0xFFFFFFFF),
             Color(0xFFFFFBF1),
@@ -456,9 +340,28 @@ class _ScreenGlassPainter extends CustomPainter {
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeCap = StrokeCap.round
-        ..strokeWidth = 3.0
+        ..strokeWidth = 3
         ..color = Colors.white.withValues(alpha: 0.96),
     );
+
+    final carbonation = 150 + (energy * 90).round();
+    for (var i = 0; i < carbonation; i++) {
+      final seedX = ((i * 83 + 17) % 997) / 997;
+      final phase = (progress * (0.42 + (i % 8) * 0.055) + i * 0.131) % 1;
+      final x = seedX * size.width - gravityX * phase * 18;
+      final top = _surface(x.clamp(0.0, size.width).toDouble(), size);
+      final y = size.height - phase * math.max(size.height - top, 1) -
+          gravityY * phase * 8;
+      if (x < 0 || x > size.width || y <= top + 4 || y > size.height) continue;
+      canvas.drawCircle(
+        Offset(x, y),
+        0.6 + (i % 6) * 0.28,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.7
+          ..color = Colors.white.withValues(alpha: 0.13 + energy * 0.10),
+      );
+    }
 
     if (flow > 0.02) {
       final edgeX = slope >= 0 ? size.width : 0.0;
@@ -484,43 +387,6 @@ class _ScreenGlassPainter extends CustomPainter {
       );
     }
 
-    final carbonation = 150 + (energy * 90).round();
-    final upwardX = -gravityX;
-    final upwardY = -gravityY;
-    for (var i = 0; i < carbonation; i++) {
-      final seedX = ((i * 83 + 17) % 997) / 997;
-      final phase = (progress * (0.42 + (i % 8) * 0.055) + i * 0.131) % 1;
-      final x = seedX * size.width + upwardX * phase * 18 + math.sin(i * 1.7) * 2;
-      final top = _surface(x.clamp(0.0, size.width).toDouble(), size);
-      final y = size.height - phase * math.max(size.height - top, 1) + upwardY * phase * 8;
-      if (x < 0 || x > size.width || y <= top + 4 || y > size.height) continue;
-      final radius = 0.6 + (i % 6) * 0.28;
-      canvas.drawCircle(
-        Offset(x, y),
-        radius,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 0.7
-          ..color = Colors.white.withValues(alpha: 0.13 + energy * 0.10),
-      );
-    }
-
-    final foamBubbles = 96 + (energy * 58).round();
-    for (var i = 0; i < foamBubbles; i++) {
-      final rx = ((i * 97 + 11) % 991) / 991;
-      final depth = ((i * 67 + 23) % 101) / 101;
-      final x = rx * size.width;
-      final y = _surface(x, size) - foamPx * (0.08 + depth * 0.86);
-      canvas.drawCircle(
-        Offset(x, y),
-        0.9 + (i % 5) * 0.52,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 0.75
-          ..color = Colors.white.withValues(alpha: 0.36),
-      );
-    }
-
     if (residue > 0.02) {
       final rings = 3 + (residue * 7).round();
       for (var i = 0; i < rings; i++) {
@@ -528,8 +394,10 @@ class _ScreenGlassPainter extends CustomPainter {
         final ring = Path()..moveTo(0, y);
         for (var s = 1; s <= 72; s++) {
           final x = size.width * s / 72;
-          final drip = math.sin(s * 0.59 + i * 1.37) * (1.2 + residue * 2.8);
-          ring.lineTo(x, y + drip);
+          ring.lineTo(
+            x,
+            y + math.sin(s * 0.59 + i * 1.37) * (1.2 + residue * 2.8),
+          );
         }
         canvas.drawPath(
           ring,
@@ -554,8 +422,6 @@ class _ScreenEdgePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final left = Rect.fromLTWH(0, 0, size.width * 0.075, size.height);
     final right = Rect.fromLTWH(size.width * 0.925, 0, size.width * 0.075, size.height);
-    final top = Rect.fromLTWH(0, 0, size.width, size.height * 0.045);
-
     canvas.drawRect(
       left,
       Paint()
@@ -574,16 +440,6 @@ class _ScreenEdgePainter extends CustomPainter {
           colors: [Colors.white.withValues(alpha: 0.18), Colors.transparent],
         ).createShader(right),
     );
-    canvas.drawRect(
-      top,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Colors.white.withValues(alpha: 0.15), Colors.transparent],
-        ).createShader(top),
-    );
-
     canvas.drawRect(
       Offset.zero & size,
       Paint()
