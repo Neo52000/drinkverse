@@ -21,7 +21,7 @@ class DrinkVessel extends StatefulWidget {
   });
 
   static const String debugVersion =
-      'DEV • PHYSICS V7.0 • REFACTORED ENGINES';
+      'DEV • PHYSICS V7.2 • CATMULL-ROM SURFACE';
 
   final Drink drink;
   final double fillLevel;
@@ -54,7 +54,7 @@ class _DrinkVesselState extends State<DrinkVessel>
   @override
   void initState() {
     super.initState();
-    _fluid = FluidSolver(columns: 64);
+    _fluid = FluidSolver(columns: 128);
     _pourEngine = PourEngine(widget.fillLevel);
     _controller = AnimationController.unbounded(vsync: this)
       ..addListener(_tick)
@@ -231,23 +231,45 @@ class _ScreenGlassPainter extends CustomPainter {
   final double gravityY;
   final double progress;
 
+  double _catmullRom(double p0, double p1, double p2, double p3, double t) {
+    final t2 = t * t;
+    final t3 = t2 * t;
+    return 0.5 *
+        ((2 * p1) +
+            (-p0 + p2) * t +
+            (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+            (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
+  }
+
+  double _sampleSurface(double normalizedX) {
+    final maxIndex = columns.length - 1;
+    final position = normalizedX.clamp(0.0, 1.0) * maxIndex;
+    final i1 = position.floor().clamp(0, maxIndex);
+    final i2 = math.min(i1 + 1, maxIndex);
+    final i0 = math.max(i1 - 1, 0);
+    final i3 = math.min(i2 + 1, maxIndex);
+    return _catmullRom(
+      columns[i0],
+      columns[i1],
+      columns[i2],
+      columns[i3],
+      position - i1,
+    );
+  }
+
   double _surface(double x, Size size) {
-    final t = (x / size.width).clamp(0.0, 1.0).toDouble();
-    final index = t * (columns.length - 1);
-    final a = index.floor();
-    final b = math.min(a + 1, columns.length - 1);
-    final local = index - a;
-    final displacement = columns[a] * (1 - local) + columns[b] * local;
+    final normalizedX = (x / size.width).clamp(0.0, 1.0).toDouble();
+    final displacement = _sampleSurface(normalizedX);
     return size.height * (1 - fillLevel.clamp(0.0, 1.0)) +
         displacement * size.height * 0.44;
   }
 
   Path _surfaceLine(Size size, {double offset = 0, double roughness = 0}) {
     final path = Path();
-    const samples = 240;
+    final samples = math.max(280, (size.width * 0.9).round());
     for (var i = 0; i <= samples; i++) {
       final x = size.width * i / samples;
-      final noise = math.sin(i * 0.53 + progress * math.pi * 2.4) * roughness;
+      final noise = math.sin(i * 0.31 + progress * math.pi * 2.4) * roughness;
       final y = _surface(x, size) + offset + noise;
       i == 0 ? path.moveTo(x, y) : path.lineTo(x, y);
     }
@@ -311,8 +333,9 @@ class _ScreenGlassPainter extends CustomPainter {
       offset: -foamPx,
       roughness: 0.8 + energy * 1.8,
     );
-    for (var i = 240; i >= 0; i--) {
-      final x = size.width * i / 240;
+    const foamSamples = 280;
+    for (var i = foamSamples; i >= 0; i--) {
+      final x = size.width * i / foamSamples;
       foam.lineTo(x, _surface(x, size));
     }
     foam.close();
