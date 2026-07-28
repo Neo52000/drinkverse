@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -21,7 +22,7 @@ class DrinkVessel extends StatefulWidget {
   });
 
   static const String debugVersion =
-      'DEV • PHYSICS V7.2 • CATMULL-ROM SURFACE';
+      'DEV • PHYSICS V7.3 • CONSERVATIVE WAVES';
 
   final Drink drink;
   final double fillLevel;
@@ -39,6 +40,10 @@ class _DrinkVesselState extends State<DrinkVessel>
   late final FluidSolver _fluid;
   late final PourEngine _pourEngine;
   final GravityEngine _gravityEngine = const GravityEngine();
+  // Vue non-copiante sur le buffer du solveur : évite une allocation de 128
+  // doubles à chaque frame (auparavant List<double>.unmodifiable(...) dans
+  // build()).
+  late final List<double> _heightView = UnmodifiableListView(_fluid.height);
 
   StreamSubscription<AccelerometerEvent>? _accelerometer;
   StreamSubscription<GyroscopeEvent>? _gyroscope;
@@ -163,7 +168,7 @@ class _DrinkVesselState extends State<DrinkVessel>
                 CustomPaint(
                   painter: _ScreenGlassPainter(
                     drink: widget.drink,
-                    columns: List<double>.unmodifiable(_fluid.height),
+                    columns: _heightView,
                     fillLevel: _pourEngine.displayFill,
                     foamDepth: _fluid.foam,
                     energy: _fluid.motionEnergy,
