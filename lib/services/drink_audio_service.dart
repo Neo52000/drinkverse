@@ -1,21 +1,45 @@
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/services.dart';
 
-/// Façade audio temporaire, sans plugin natif externe.
+/// Façade audio du verre.
 ///
-/// Cette version garantit la compilation Android avec la configuration Gradle
-/// actuelle. Les méthodes restent stables afin de pouvoir brancher ensuite un
-/// moteur audio natif dédié sans modifier le moteur de simulation.
+/// Les sons servis (`assets/audio/*.wav`) sont synthétiques (générés par
+/// `tool/generate_audio_assets.py`), pas des enregistrements réels — ils
+/// peuvent être remplacés à tout moment en déposant un fichier du même nom
+/// dans `assets/audio/`, sans toucher à cette classe ni au moteur de
+/// simulation.
 class DrinkAudioService {
   DrinkAudioService._();
 
   static final DrinkAudioService instance = DrinkAudioService._();
 
+  static const _pourAsset = 'audio/pour_loop.wav';
+  static const _fizzAsset = 'audio/fizz_loop.wav';
+  static const _refillAsset = 'audio/refill_clink.wav';
+  static const _emptyAsset = 'audio/empty_glass.wav';
+
+  final AudioPlayer _pourPlayer = AudioPlayer(playerId: 'drinkverse-pour');
+  final AudioPlayer _fizzPlayer = AudioPlayer(playerId: 'drinkverse-fizz');
+  final AudioPlayer _oneShotPlayer =
+      AudioPlayer(playerId: 'drinkverse-oneshot');
+
+  bool _initialized = false;
   bool _muted = false;
   bool _pouring = false;
+  bool _fizzing = false;
 
   bool get muted => _muted;
 
-  Future<void> initialize() async {}
+  Future<void> initialize() async {
+    if (_initialized) return;
+    _initialized = true;
+    await _safe(() async {
+      await _pourPlayer.setReleaseMode(ReleaseMode.loop);
+      await _fizzPlayer.setReleaseMode(ReleaseMode.loop);
+      await _pourPlayer.setSource(AssetSource(_pourAsset));
+      await _fizzPlayer.setSource(AssetSource(_fizzAsset));
+    });
+  }
 
   Future<void> setMuted(bool value) async {
     _muted = value;
@@ -25,47 +49,86 @@ class DrinkAudioService {
   }
 
   Future<void> startFizz({double intensity = 0.45}) async {
-    if (_muted) return;
+    if (_muted || _fizzing) return;
+    _fizzing = true;
+    await _safe(() async {
+      await _fizzPlayer.setVolume(intensity.clamp(0.0, 1.0));
+      await _fizzPlayer.resume();
+    });
   }
 
-  Future<void> stopFizz() async {}
+  Future<void> stopFizz() async {
+    if (!_fizzing) return;
+    _fizzing = false;
+    await _safe(() => _fizzPlayer.pause());
+  }
 
   Future<void> startPour({double intensity = 0.5}) async {
     if (_muted || _pouring) return;
     _pouring = true;
-    await SystemSound.play(SystemSoundType.click);
     await HapticFeedback.selectionClick();
+    await _safe(() async {
+      await _pourPlayer.setVolume(intensity.clamp(0.0, 1.0));
+      await _pourPlayer.resume();
+    });
   }
 
-  Future<void> updatePourIntensity(double intensity) async {}
+  Future<void> updatePourIntensity(double intensity) async {
+    if (!_pouring || _muted) return;
+    await _safe(() => _pourPlayer.setVolume(intensity.clamp(0.0, 1.0)));
+  }
 
   Future<void> stopPour() async {
+    if (!_pouring) return;
     _pouring = false;
+    await _safe(() => _pourPlayer.pause());
   }
 
   Future<void> playIceClink({double strength = 0.6}) async {
     if (_muted) return;
-    await SystemSound.play(SystemSoundType.click);
     await HapticFeedback.lightImpact();
+    await _safe(
+      () => _oneShotPlayer.play(
+        AssetSource(_refillAsset),
+        volume: strength.clamp(0.0, 1.0),
+      ),
+    );
   }
 
   Future<void> playRefill() async {
     if (_muted) return;
-    await SystemSound.play(SystemSoundType.click);
     await HapticFeedback.mediumImpact();
+    await _safe(() => _oneShotPlayer.play(AssetSource(_refillAsset)));
   }
 
   Future<void> playEmptyGlass() async {
     if (_muted) return;
-    await SystemSound.play(SystemSoundType.alert);
     await HapticFeedback.mediumImpact();
+    await _safe(() => _oneShotPlayer.play(AssetSource(_emptyAsset)));
   }
 
   Future<void> stopAll() async {
     _pouring = false;
+    _fizzing = false;
+    await _safe(() => _pourPlayer.pause());
+    await _safe(() => _fizzPlayer.pause());
   }
 
   Future<void> dispose() async {
-    _pouring = false;
+    await stopAll();
+    await _safe(() => _pourPlayer.dispose());
+    await _safe(() => _fizzPlayer.dispose());
+    await _safe(() => _oneShotPlayer.dispose());
+  }
+
+  /// Avale les erreurs de plateforme (pas de backend audio disponible — cas
+  /// des tests ou d'une plateforme non supportée) : le son est un bonus,
+  /// jamais une raison de faire planter l'UI.
+  Future<void> _safe(Future<void> Function() action) async {
+    try {
+      await action();
+    } catch (_) {
+      // Dégradation silencieuse.
+    }
   }
 }
