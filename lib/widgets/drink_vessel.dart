@@ -422,6 +422,27 @@ class _ScreenGlassPainter extends CustomPainter {
         ..color = Colors.white.withValues(alpha: 0.96),
     );
 
+    // Texture de bulles dans la mousse : la mousse est déjà quasi blanche,
+    // donc un contour ambré discret se voit mieux qu'un remplissage blanc.
+    final foamBubbleCount = 40 + (energy * 40).round();
+    for (var i = 0; i < foamBubbleCount; i++) {
+      final seedX = ((i * 131 + 53) % 991) / 991;
+      final phase = (progress * (0.55 + (i % 5) * 0.09) + i * 0.213) % 1;
+      final x = seedX * size.width;
+      final top = _surface(x, size) - foamPx;
+      final bottom = _surface(x, size);
+      final y = top + phase * math.max(bottom - top, 1);
+      final popAlpha = ((1 - phase) * 0.55).clamp(0.0, 0.55);
+      canvas.drawCircle(
+        Offset(x, y),
+        0.6 + (i % 4) * 0.4,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.6
+          ..color = const Color(0xFFC99344).withValues(alpha: popAlpha),
+      );
+    }
+
     final carbonation = 150 + (energy * 90).round();
     for (var i = 0; i < carbonation; i++) {
       final seedX = ((i * 83 + 17) % 997) / 997;
