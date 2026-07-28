@@ -15,6 +15,8 @@ class DrinkVessel extends StatelessWidget {
     this.paused = false,
   });
 
+  static const String debugVersion = 'DEV • PHYSICS V3.1 • 96P';
+
   final Drink drink;
   final double fillLevel;
   final bool bubbles;
@@ -65,10 +67,64 @@ class DrinkVessel extends StatelessWidget {
                   ),
                 ),
               ),
+              const Positioned(
+                top: 12,
+                right: 12,
+                child: IgnorePointer(
+                  child: _DebugVersionBadge(),
+                ),
+              ),
             ],
           ),
         );
       },
+    );
+  }
+}
+
+class _DebugVersionBadge extends StatelessWidget {
+  const _DebugVersionBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.68),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.24),
+          width: 1,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.35),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+        child: Text(
+          DrinkVessel.debugVersion,
+          maxLines: 1,
+          overflow: TextOverflow.fade,
+          softWrap: false,
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 10,
+            height: 1,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.45,
+            shadows: [
+              Shadow(
+                color: Colors.black87,
+                blurRadius: 2,
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
