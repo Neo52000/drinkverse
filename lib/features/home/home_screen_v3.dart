@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import '../../models/drink.dart';
 import '../../widgets/drink_vessel.dart';
+import 'vessel_simulation_screen.dart';
 
 class HomeScreenV3 extends StatefulWidget {
   const HomeScreenV3({super.key});
@@ -243,63 +244,6 @@ class _DrinkCard extends StatelessWidget {
                 child: Text(
                   _glassLabel(drink.glassType),
                   style: TextStyle(color: drink.color, fontSize: 11),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class VesselSimulationScreen extends StatelessWidget {
-  const VesselSimulationScreen({super.key, required this.drink});
-
-  final Drink drink;
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppTheme.background,
-      body: SafeArea(
-        child: DecoratedBox(
-          decoration: const BoxDecoration(gradient: AppTheme.appGradient),
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 8, 18, 8),
-                child: Row(
-                  children: [
-                    IconButton(
-                      onPressed: () => Navigator.of(context).pop(),
-                      icon: const Icon(Icons.arrow_back_rounded),
-                    ),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(drink.name, style: Theme.of(context).textTheme.titleLarge),
-                          Text('${drink.subtitle} • ${_glassLabel(drink.glassType)}'),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(18, 8, 18, 12),
-                  child: DrinkVessel(drink: drink),
-                ),
-              ),
-              const Padding(
-                padding: EdgeInsets.fromLTRB(24, 4, 24, 24),
-                child: Text(
-                  'Incline le téléphone. Le liquide, les bulles, la mousse et les glaçons réagissent aux mouvements.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: AppTheme.textSecondary),
                 ),
               ),
             ],
