@@ -54,8 +54,8 @@ class DrinkBubbleProfile {
         );
       case 'Cocktails':
         return DrinkBubbleProfile(
-          enabled: drink.bubbles,
-          baseCount: drink.bubbles ? 28 : 0,
+          enabled: drink.ice,
+          baseCount: drink.ice ? 28 : 0,
           motionBoost: 12,
           minSpeed: 0.18,
           speedSpread: 0.25,
@@ -78,8 +78,8 @@ class DrinkBubbleProfile {
         );
       default:
         return DrinkBubbleProfile(
-          enabled: drink.bubbles,
-          baseCount: drink.bubbles ? 36 : 0,
+          enabled: drink.ice,
+          baseCount: drink.ice ? 36 : 0,
           motionBoost: 14,
           minSpeed: 0.22,
           speedSpread: 0.30,
