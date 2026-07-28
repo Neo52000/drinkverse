@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../features/home/home_screen_v2.dart';
+import '../features/home/home_screen_v3.dart';
 import 'app_theme.dart';
 
 class DrinkVerseApp extends StatelessWidget {
@@ -12,7 +12,7 @@ class DrinkVerseApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'DrinkVerse',
       theme: AppTheme.dark,
-      home: const HomeScreenV2(),
+      home: const HomeScreenV3(),
     );
   }
 }
