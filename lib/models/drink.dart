@@ -1,5 +1,12 @@
 import 'package:flutter/material.dart';
 
+enum GlassType {
+  pint,
+  highball,
+  cocktail,
+  mug,
+}
+
 class Drink {
   const Drink({
     required this.name,
@@ -9,6 +16,7 @@ class Drink {
     required this.subtitle,
     required this.foam,
     required this.ice,
+    required this.glassType,
   });
 
   final String name;
@@ -18,6 +26,7 @@ class Drink {
   final String subtitle;
   final bool foam;
   final bool ice;
+  final GlassType glassType;
 }
 
 const drinks = <Drink>[
@@ -29,6 +38,7 @@ const drinks = <Drink>[
     subtitle: 'Mousse dense • Bulles fines',
     foam: true,
     ice: false,
+    glassType: GlassType.pint,
   ),
   Drink(
     name: 'Cola glacé',
@@ -38,6 +48,7 @@ const drinks = <Drink>[
     subtitle: 'Glaçons • Effervescence',
     foam: false,
     ice: true,
+    glassType: GlassType.highball,
   ),
   Drink(
     name: 'Mojito',
@@ -47,6 +58,7 @@ const drinks = <Drink>[
     subtitle: 'Menthe • Citron vert',
     foam: false,
     ice: true,
+    glassType: GlassType.cocktail,
   ),
   Drink(
     name: 'Café crème',
@@ -56,5 +68,6 @@ const drinks = <Drink>[
     subtitle: 'Créma • Vapeur légère',
     foam: true,
     ice: false,
+    glassType: GlassType.mug,
   ),
 ];
