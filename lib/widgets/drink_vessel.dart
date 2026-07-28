@@ -27,40 +27,65 @@ class DrinkVessel extends StatelessWidget {
       builder: (context, constraints) {
         final width = constraints.maxWidth;
         final height = constraints.maxHeight;
+        final overscan = _liquidOverscan(drink.glassType);
 
-        return Stack(
-          alignment: Alignment.center,
-          children: [
-            Positioned.fill(
-              child: CustomPaint(
-                painter: _VesselShadowPainter(type: drink.glassType),
-              ),
-            ),
-            ClipPath(
-              clipper: _VesselClipper(drink.glassType),
-              child: SizedBox(
-                width: width,
-                height: height,
-                child: DrinkGlass(
-                  drink: drink,
-                  fillLevel: fillLevel,
-                  bubbles: bubbles,
-                  condensation: condensation,
-                  paused: paused,
-                ),
-              ),
-            ),
-            Positioned.fill(
-              child: IgnorePointer(
+        return RepaintBoundary(
+          child: Stack(
+            alignment: Alignment.center,
+            clipBehavior: Clip.none,
+            children: [
+              Positioned.fill(
                 child: CustomPaint(
-                  painter: _VesselHighlightPainter(type: drink.glassType),
+                  painter: _VesselShadowPainter(type: drink.glassType),
                 ),
               ),
-            ),
-          ],
+              ClipPath(
+                clipper: _VesselClipper(drink.glassType),
+                child: SizedBox(
+                  width: width,
+                  height: height,
+                  child: Transform.scale(
+                    scaleX: overscan.width,
+                    scaleY: overscan.height,
+                    alignment: Alignment.center,
+                    child: DrinkGlass(
+                      drink: drink,
+                      fillLevel: fillLevel,
+                      bubbles: bubbles,
+                      condensation: condensation,
+                      paused: paused,
+                    ),
+                  ),
+                ),
+              ),
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: CustomPaint(
+                    painter: _VesselHighlightPainter(type: drink.glassType),
+                  ),
+                ),
+              ),
+            ],
+          ),
         );
       },
     );
+  }
+}
+
+/// Le moteur historique possède sa propre marge intérieure. Ce léger surbalayage
+/// la place derrière le masque du verre afin que le liquide rejoigne visuellement
+/// les parois, sans toucher à la physique, aux capteurs ni au vidage.
+Size _liquidOverscan(GlassType type) {
+  switch (type) {
+    case GlassType.pint:
+      return const Size(1.14, 1.045);
+    case GlassType.highball:
+      return const Size(1.16, 1.04);
+    case GlassType.cocktail:
+      return const Size(1.10, 1.025);
+    case GlassType.mug:
+      return const Size(1.14, 1.04);
   }
 }
 
