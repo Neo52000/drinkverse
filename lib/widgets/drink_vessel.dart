@@ -17,7 +17,8 @@ class DrinkVessel extends StatefulWidget {
     this.paused = false,
   });
 
-  static const String debugVersion = 'DEV • PHYSICS V5.0 • PARTICLE VOLUME';
+  static const String debugVersion =
+      'DEV • PHYSICS V5.1 • BEER SIM VISUAL';
 
   final Drink drink;
   final double fillLevel;
@@ -31,7 +32,7 @@ class DrinkVessel extends StatefulWidget {
 
 class _DrinkVesselState extends State<DrinkVessel>
     with SingleTickerProviderStateMixin {
-  static const int _columns = 28;
+  static const int _columns = 44;
 
   late final AnimationController _controller;
   late final List<double> _height;
@@ -47,13 +48,14 @@ class _DrinkVesselState extends State<DrinkVessel>
   double _angularVelocity = 0;
   double _shake = 0;
   double _pour = 0;
+  double _flow = 0;
   double _displayFill = 0.72;
   double _initialFill = 0.72;
-  double _foam = 0.08;
+  double _foam = 0.075;
   double _residue = 0;
   Duration _lastElapsed = Duration.zero;
 
-  bool get _particleMode => widget.drink.foam;
+  bool get _beerMode => widget.drink.foam;
 
   @override
   void initState() {
@@ -74,7 +76,7 @@ class _DrinkVesselState extends State<DrinkVessel>
     super.didUpdateWidget(oldWidget);
     if (oldWidget.drink != widget.drink) {
       _reset();
-    } else if (oldWidget.fillLevel != widget.fillLevel && _pour < 0.01) {
+    } else if (oldWidget.fillLevel != widget.fillLevel && _flow < 0.01) {
       _displayFill = widget.fillLevel;
       _initialFill = widget.fillLevel;
     }
@@ -83,8 +85,9 @@ class _DrinkVesselState extends State<DrinkVessel>
   void _reset() {
     _displayFill = widget.fillLevel;
     _initialFill = widget.fillLevel;
-    _foam = 0.08;
+    _foam = 0.075;
     _residue = 0;
+    _flow = 0;
     for (var i = 0; i < _columns; i++) {
       _height[i] = 0;
       _velocity[i] = 0;
@@ -99,24 +102,27 @@ class _DrinkVesselState extends State<DrinkVessel>
       if (gravity > 0.01) {
         _targetTilt = (event.x / gravity).clamp(-1.0, 1.0).toDouble();
       }
-      final faceDown = (1 - event.y.abs() / 9.81).clamp(0.0, 1.0).toDouble();
-      _pour = faceDown;
+
+      final vertical = (event.y.abs() / 9.81).clamp(0.0, 1.0).toDouble();
+      _pour = (1 - vertical).clamp(0.0, 1.0).toDouble();
     }, onError: (_) {});
 
     _gyroscope = gyroscopeEventStream(
       samplingPeriod: SensorInterval.gameInterval,
     ).listen((event) {
-      _angularVelocity = (event.z * 0.9 + event.y * 0.1)
-          .clamp(-10.0, 10.0)
+      _angularVelocity = (event.z * 0.92 + event.y * 0.08)
+          .clamp(-12.0, 12.0)
           .toDouble();
       final energy = math.sqrt(
         event.x * event.x + event.y * event.y + event.z * event.z,
       );
-      _shake = math.max(_shake, (energy / 6).clamp(0.0, 1.0).toDouble());
-      final side = event.x >= 0 ? _columns * 2 ~/ 3 : _columns ~/ 3;
+      _shake = math.max(_shake, (energy / 6.5).clamp(0.0, 1.0).toDouble());
+
+      final impact = (event.y * 0.65 + event.z * 0.35).clamp(-8.0, 8.0);
+      final center = event.x >= 0 ? _columns * 2 ~/ 3 : _columns ~/ 3;
       for (var i = 0; i < _columns; i++) {
-        final d = i - side;
-        _velocity[i] += event.y * math.exp(-(d * d) / 30) * 0.05;
+        final d = i - center;
+        _velocity[i] += impact * math.exp(-(d * d) / 52) * 0.038;
       }
     }, onError: (_) {});
   }
@@ -128,7 +134,7 @@ class _DrinkVesselState extends State<DrinkVessel>
     _lastElapsed = elapsed;
     if (dt <= 0 || dt > 0.05) dt = 1 / 60;
 
-    if (_particleMode) {
+    if (_beerMode) {
       _stepFluid(dt);
       _stepPour(dt);
       setState(() {});
@@ -136,13 +142,14 @@ class _DrinkVesselState extends State<DrinkVessel>
   }
 
   void _stepFluid(double dt) {
-    final acceleration =
-        (_targetTilt - _tilt) * 18 - _tiltVelocity * 4.6 + _angularVelocity * 0.18;
+    final acceleration = (_targetTilt - _tilt) * 24 -
+        _tiltVelocity * 5.8 +
+        _angularVelocity * 0.13;
     _tiltVelocity += acceleration * dt;
     _tilt += _tiltVelocity * dt;
-    _tilt = _tilt.clamp(-1.18, 1.18).toDouble();
+    _tilt = _tilt.clamp(-1.08, 1.08).toDouble();
 
-    const substeps = 4;
+    const substeps = 5;
     final step = dt / substeps;
     for (var s = 0; s < substeps; s++) {
       for (var i = 0; i < _columns; i++) {
@@ -150,53 +157,66 @@ class _DrinkVesselState extends State<DrinkVessel>
         final left = _height[i == 0 ? 1 : i - 1];
         final right = _height[i == _columns - 1 ? _columns - 2 : i + 1];
         final laplacian = left + right - 2 * _height[i];
-        final equilibrium = x * _tilt * 0.40;
-        final turbulence = math.sin(
-              i * 0.73 + _controller.value * math.pi * 6,
+
+        // The bulk follows gravity. The secondary wave is deliberately small:
+        // beer should feel heavy, not gelatinous.
+        final equilibrium = x * _tilt * 0.31;
+        final travellingWave = math.sin(
+              i * 0.42 - _controller.value * math.pi * 5.2,
             ) *
             _shake *
-            0.012;
-        final force = laplacian * 48 +
-            (equilibrium - _height[i]) * 22 -
-            _velocity[i] * (5.2 - _shake * 1.4) +
-            turbulence;
+            0.008;
+        final edgeWeight = math.pow(x.abs(), 2).toDouble();
+        final wallRebound = -_tiltVelocity * x * edgeWeight * 0.032;
+
+        final force = laplacian * 72 +
+            (equilibrium - _height[i]) * 29 -
+            _velocity[i] * (6.8 - _shake * 1.5) +
+            travellingWave +
+            wallRebound;
         _velocity[i] += force * step;
         _next[i] = _height[i] + _velocity[i] * step;
       }
 
       final mean = _next.reduce((a, b) => a + b) / _columns;
       for (var i = 0; i < _columns; i++) {
-        _height[i] = (_next[i] - mean).clamp(-0.55, 0.55).toDouble();
+        _height[i] = (_next[i] - mean).clamp(-0.46, 0.46).toDouble();
       }
-      _velocity.first *= 0.62;
-      _velocity.last *= 0.62;
+      _velocity.first *= 0.48;
+      _velocity.last *= 0.48;
     }
 
-    _foam += (_shake * 0.16 - _foam) * dt * 0.7;
-    _foam = _foam.clamp(0.045, 0.22).toDouble();
-    _shake *= math.pow(0.025, dt).toDouble();
-    _angularVelocity *= math.pow(0.08, dt).toDouble();
+    final foamTarget = 0.072 + _shake * 0.105 + _flow * 0.045;
+    _foam += (foamTarget - _foam) * dt * (_shake > 0.2 ? 2.2 : 0.34);
+    _foam = _foam.clamp(0.055, 0.19).toDouble();
+    _shake *= math.pow(0.035, dt).toDouble();
+    _angularVelocity *= math.pow(0.065, dt).toDouble();
   }
 
   void _stepPour(double dt) {
-    if (_displayFill <= 0.001) return;
-    final threshold = 0.58 - _displayFill * 0.08;
-    final flow = ((_pour - threshold) / (1 - threshold))
+    if (_displayFill <= 0.001) {
+      _flow += (0 - _flow) * dt * 8;
+      return;
+    }
+
+    final threshold = 0.53 - _displayFill * 0.10;
+    final requested = ((_pour - threshold) / (1 - threshold))
         .clamp(0.0, 1.0)
         .toDouble();
-    if (flow <= 0) return;
+    _flow += (requested - _flow) * dt * (requested > _flow ? 10 : 5);
+    _flow = _flow.clamp(0.0, 1.0).toDouble();
 
-    _displayFill = (_displayFill - (0.06 + flow * flow * 0.44) * dt)
-        .clamp(0.0, 0.98)
-        .toDouble();
-    _shake = math.max(_shake, 0.35 + flow * 0.55);
+    if (_flow <= 0.012) return;
+    final rate = 0.035 + _flow * _flow * 0.49;
+    _displayFill = (_displayFill - rate * dt).clamp(0.0, 0.98).toDouble();
+    _shake = math.max(_shake, 0.22 + _flow * 0.52);
     _residue = ((_initialFill - _displayFill) / math.max(_initialFill, 0.01))
         .clamp(0.0, 1.0)
         .toDouble();
   }
 
   void _refill() {
-    if (!_particleMode || _displayFill > 0.02) return;
+    if (!_beerMode || _displayFill > 0.02) return;
     setState(_reset);
   }
 
@@ -237,20 +257,18 @@ class _DrinkVesselState extends State<DrinkVessel>
                   painter: _VesselShadowPainter(type: widget.drink.glassType),
                 ),
               ),
-              if (_particleMode)
+              if (_beerMode)
                 Positioned.fill(
                   child: ClipPath(
                     clipper: _VesselClipper(widget.drink.glassType),
                     child: CustomPaint(
-                      painter: _ParticleBeerPainter(
+                      painter: _BeerSimulatorPainter(
                         drink: widget.drink,
                         columns: List<double>.unmodifiable(_height),
                         fillLevel: _displayFill,
                         foamDepth: _foam,
                         energy: _shake,
                         residue: _residue,
-                        pour: _pour,
-                        tilt: _tilt,
                         progress: _controller.value,
                       ),
                     ),
@@ -268,6 +286,22 @@ class _DrinkVesselState extends State<DrinkVessel>
                       bubbles: widget.bubbles,
                       condensation: widget.condensation,
                       paused: widget.paused,
+                    ),
+                  ),
+                ),
+              if (_beerMode && _flow > 0.012)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: CustomPaint(
+                      painter: _ExternalPourPainter(
+                        drink: widget.drink,
+                        columns: List<double>.unmodifiable(_height),
+                        fillLevel: _displayFill,
+                        foamDepth: _foam,
+                        flow: _flow,
+                        tilt: _tilt,
+                        progress: _controller.value,
+                      ),
                     ),
                   ),
                 ),
@@ -291,16 +325,14 @@ class _DrinkVesselState extends State<DrinkVessel>
   }
 }
 
-class _ParticleBeerPainter extends CustomPainter {
-  const _ParticleBeerPainter({
+class _BeerSimulatorPainter extends CustomPainter {
+  const _BeerSimulatorPainter({
     required this.drink,
     required this.columns,
     required this.fillLevel,
     required this.foamDepth,
     required this.energy,
     required this.residue,
-    required this.pour,
-    required this.tilt,
     required this.progress,
   });
 
@@ -310,8 +342,6 @@ class _ParticleBeerPainter extends CustomPainter {
   final double foamDepth;
   final double energy;
   final double residue;
-  final double pour;
-  final double tilt;
   final double progress;
 
   double _surface(double x, Size size) {
@@ -321,18 +351,19 @@ class _ParticleBeerPainter extends CustomPainter {
     final b = math.min(a + 1, columns.length - 1);
     final local = index - a;
     final displacement = columns[a] * (1 - local) + columns[b] * local;
-    final top = size.height * 0.04;
-    final bottom = size.height * 0.94;
+    final top = size.height * 0.035;
+    final bottom = size.height * 0.945;
     final base = bottom - (bottom - top) * fillLevel;
-    return base + displacement * size.height * 0.34;
+    return base + displacement * size.height * 0.31;
   }
 
-  Path _surfacePath(Size size, {double offset = 0}) {
+  Path _line(Size size, {double offset = 0, double roughness = 0}) {
     final path = Path();
-    const samples = 150;
+    const samples = 180;
     for (var i = 0; i <= samples; i++) {
       final x = size.width * i / samples;
-      final y = _surface(x, size) + offset;
+      final noise = math.sin(i * 0.61 + progress * math.pi * 2.1) * roughness;
+      final y = _surface(x, size) + offset + noise;
       i == 0 ? path.moveTo(x, y) : path.lineTo(x, y);
     }
     return path;
@@ -353,130 +384,238 @@ class _ParticleBeerPainter extends CustomPainter {
       return;
     }
 
-    final liquid = _surfacePath(size)
+    final liquid = _line(size)
       ..lineTo(size.width, size.height + 2)
       ..lineTo(0, size.height + 2)
       ..close();
-
     canvas.drawPath(
       liquid,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          stops: const [0, 0.13, 0.48, 0.78, 1],
+          colors: [
+            Color.lerp(drink.color, Colors.white, 0.34)!,
+            Color.lerp(drink.color, Colors.white, 0.10)!,
+            drink.color,
+            Color.lerp(drink.color, Colors.black, 0.32)!,
+            Color.lerp(drink.color, Colors.black, 0.58)!,
+          ],
+        ).createShader(Offset.zero & size),
+    );
+
+    // Internal luminous band gives the liquid optical depth instead of a flat fill.
+    final glow = _line(size, offset: size.height * 0.018)
+      ..lineTo(size.width, size.height * 0.72)
+      ..lineTo(0, size.height * 0.72)
+      ..close();
+    canvas.drawPath(
+      glow,
       Paint()
         ..shader = LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [
-            Color.lerp(drink.color, Colors.white, 0.18)!,
-            drink.color,
-            Color.lerp(drink.color, Colors.black, 0.48)!,
+            Colors.white.withValues(alpha: 0.16),
+            Colors.transparent,
           ],
         ).createShader(Offset.zero & size),
     );
 
     final foamPx = size.height * foamDepth;
-    final foam = _surfacePath(size, offset: -foamPx)
-      ..lineTo(size.width, _surface(size.width, size))
-      ..addPath(_surfacePath(size), Offset.zero)
-      ..close();
+    final foam = _line(size, offset: -foamPx, roughness: 0.7 + energy * 1.4);
+    for (var i = 180; i >= 0; i--) {
+      final x = size.width * i / 180;
+      foam.lineTo(x, _surface(x, size));
+    }
+    foam.close();
     canvas.drawPath(
       foam,
       Paint()
         ..shader = const LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Color(0xFFFFFFFF), Color(0xFFF7E8C8), Color(0xFFDAB873)],
+          stops: [0, 0.38, 0.82, 1],
+          colors: [
+            Color(0xFFFFFFFF),
+            Color(0xFFFFFAEE),
+            Color(0xFFF1D8A8),
+            Color(0xFFC99548),
+          ],
         ).createShader(Offset.zero & size),
     );
 
-    final crest = _surfacePath(size, offset: -foamPx);
     canvas.drawPath(
-      crest,
+      _line(size, offset: -foamPx, roughness: 0.7 + energy * 1.4),
       Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.4
-        ..color = Colors.white.withValues(alpha: 0.92),
+        ..strokeWidth = 2.6
+        ..strokeCap = StrokeCap.round
+        ..color = Colors.white.withValues(alpha: 0.96),
     );
 
-    final particles = 90 + (energy * 70).round();
-    for (var i = 0; i < particles; i++) {
-      final rx = ((i * 73 + 19) % 997) / 997;
-      final ry = ((i * 151 + 37) % 991) / 991;
-      final x = rx * size.width;
-      final top = _surface(x, size);
-      final y = top + ry * math.max(size.height - top, 1);
-      final radius = 0.7 + (i % 5) * 0.32;
+    // Carbonation rises over time instead of remaining as static dots.
+    final carbonation = 105 + (energy * 70).round();
+    for (var i = 0; i < carbonation; i++) {
+      final rx = ((i * 83 + 17) % 997) / 997;
+      final phase = (progress * (0.45 + (i % 7) * 0.07) + i * 0.137) % 1;
+      final x = rx * size.width + math.sin(i * 1.7 + progress * 8) * 1.8;
+      final top = _surface(x.clamp(0, size.width).toDouble(), size);
+      final y = size.height - phase * math.max(size.height - top, 1);
+      if (y <= top + 3) continue;
+      final radius = 0.55 + (i % 5) * 0.28;
       canvas.drawCircle(
         Offset(x, y),
         radius,
-        Paint()..color = Colors.white.withValues(alpha: 0.08 + energy * 0.08),
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.65
+          ..color = Colors.white.withValues(alpha: 0.12 + energy * 0.08),
       );
     }
 
-    final foamBubbles = 38 + (energy * 36).round();
+    final foamBubbles = 72 + (energy * 45).round();
     for (var i = 0; i < foamBubbles; i++) {
-      final rx = ((i * 89 + 7) % 983) / 983;
-      final depth = ((i * 61 + 13) % 101) / 101;
+      final rx = ((i * 97 + 11) % 991) / 991;
+      final depth = ((i * 67 + 23) % 101) / 101;
       final x = rx * size.width;
-      final y = _surface(x, size) - foamPx * (0.1 + depth * 0.82);
+      final y = _surface(x, size) - foamPx * (0.08 + depth * 0.86);
+      final radius = 0.8 + (i % 5) * 0.48;
       canvas.drawCircle(
         Offset(x, y),
-        1.0 + (i % 4) * 0.65,
+        radius,
         Paint()
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 0.8
-          ..color = Colors.white.withValues(alpha: 0.32),
+          ..strokeWidth = 0.75
+          ..color = Colors.white.withValues(alpha: 0.34),
       );
     }
 
-    if (residue > 0.03) {
-      for (var i = 0; i < 5; i++) {
-        final y = size.height * (0.16 + i * 0.105);
-        canvas.drawArc(
-          Rect.fromCenter(
-            center: Offset(size.width * 0.5, y),
-            width: size.width * (0.55 + i * 0.025),
-            height: 10 + i * 2,
-          ),
-          0,
-          math.pi,
-          false,
+    if (residue > 0.02) {
+      final rings = 3 + (residue * 6).round();
+      for (var i = 0; i < rings; i++) {
+        final y = size.height * (0.13 + i * 0.072);
+        final ring = Path()..moveTo(size.width * 0.19, y);
+        for (var s = 1; s <= 48; s++) {
+          final x = size.width * (0.19 + 0.62 * s / 48);
+          final drip = math.sin(s * 0.67 + i * 1.4) * (1.1 + residue * 2.2);
+          ring.lineTo(x, y + drip);
+        }
+        canvas.drawPath(
+          ring,
           Paint()
             ..style = PaintingStyle.stroke
-            ..strokeWidth = 1.2
-            ..color = const Color(0xFFF3DFB5)
-                .withValues(alpha: residue * (0.18 + i * 0.025)),
+            ..strokeWidth = 1.15
+            ..color = const Color(0xFFF4E1B9)
+                .withValues(alpha: 0.10 + residue * 0.24),
         );
       }
-    }
-
-    final flow = ((pour - 0.55) / 0.45).clamp(0.0, 1.0).toDouble();
-    if (flow > 0.02) {
-      final right = tilt >= 0;
-      final x = right ? size.width * 0.82 : size.width * 0.18;
-      final direction = right ? 1.0 : -1.0;
-      final y = _surface(x, size) - foamPx * 0.45;
-      final stream = Path()
-        ..moveTo(x, y)
-        ..cubicTo(
-          x + 12 * direction,
-          y - 14,
-          x + 22 * direction,
-          y - 45,
-          x + 28 * direction,
-          y - 86 - flow * 35,
-        );
-      canvas.drawPath(
-        stream,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeCap = StrokeCap.round
-          ..strokeWidth = 5 + flow * 8
-          ..color = drink.color.withValues(alpha: 0.90),
-      );
     }
   }
 
   @override
-  bool shouldRepaint(covariant _ParticleBeerPainter oldDelegate) => true;
+  bool shouldRepaint(covariant _BeerSimulatorPainter oldDelegate) => true;
+}
+
+class _ExternalPourPainter extends CustomPainter {
+  const _ExternalPourPainter({
+    required this.drink,
+    required this.columns,
+    required this.fillLevel,
+    required this.foamDepth,
+    required this.flow,
+    required this.tilt,
+    required this.progress,
+  });
+
+  final Drink drink;
+  final List<double> columns;
+  final double fillLevel;
+  final double foamDepth;
+  final double flow;
+  final double tilt;
+  final double progress;
+
+  double _surface(double x, Size size) {
+    final t = (x / size.width).clamp(0.0, 1.0).toDouble();
+    final index = t * (columns.length - 1);
+    final a = index.floor();
+    final b = math.min(a + 1, columns.length - 1);
+    final local = index - a;
+    final d = columns[a] * (1 - local) + columns[b] * local;
+    final base = size.height * 0.945 - size.height * 0.91 * fillLevel;
+    return base + d * size.height * 0.31;
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final right = tilt >= 0;
+    final direction = right ? 1.0 : -1.0;
+    final lipX = right ? size.width * 0.835 : size.width * 0.165;
+    final lipY = math.min(
+      _surface(lipX, size) - size.height * foamDepth * 0.18,
+      size.height * 0.075,
+    );
+
+    final length = 58 + flow * 155;
+    final width = 3.0 + flow * 11;
+    final flutter = math.sin(progress * math.pi * 7) * flow * 3.5;
+    final stream = Path()
+      ..moveTo(lipX - direction * width * 0.45, lipY)
+      ..cubicTo(
+        lipX + direction * (8 + flutter),
+        lipY - 18,
+        lipX + direction * (17 + flutter),
+        lipY - length * 0.58,
+        lipX + direction * (24 + flutter),
+        lipY - length,
+      )
+      ..lineTo(
+        lipX + direction * (24 + flutter + width),
+        lipY - length,
+      )
+      ..cubicTo(
+        lipX + direction * (22 + flutter + width),
+        lipY - length * 0.55,
+        lipX + direction * (10 + width),
+        lipY - 12,
+        lipX + direction * width * 0.5,
+        lipY + 2,
+      )
+      ..close();
+
+    canvas.drawShadow(stream, Colors.black.withValues(alpha: 0.30), 5, false);
+    canvas.drawPath(
+      stream,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+          colors: [
+            Color.lerp(drink.color, Colors.black, 0.28)!.withValues(alpha: 0.88),
+            Color.lerp(drink.color, Colors.white, 0.30)!.withValues(alpha: 0.94),
+            drink.color.withValues(alpha: 0.86),
+          ],
+        ).createShader(stream.getBounds()),
+    );
+
+    if (flow > 0.55) {
+      for (var i = 0; i < 3; i++) {
+        final phase = (progress * (1.3 + i * 0.2) + i * 0.31) % 1;
+        final x = lipX + direction * (26 + flutter + i * 3);
+        final y = lipY - length - phase * (18 + flow * 24);
+        canvas.drawCircle(
+          Offset(x, y),
+          1.8 + i * 0.7,
+          Paint()..color = drink.color.withValues(alpha: 0.78),
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _ExternalPourPainter oldDelegate) => true;
 }
 
 class _DebugVersionBadge extends StatelessWidget {
@@ -514,7 +653,8 @@ class _VesselClipper extends CustomClipper<Path> {
   Path getClip(Size size) => _buildVesselPath(size, type);
 
   @override
-  bool shouldReclip(covariant _VesselClipper oldClipper) => oldClipper.type != type;
+  bool shouldReclip(covariant _VesselClipper oldClipper) =>
+      oldClipper.type != type;
 }
 
 Path _buildVesselPath(Size size, GlassType type) {
@@ -595,6 +735,23 @@ class _VesselHighlightPainter extends CustomPainter {
           end: Alignment.bottomRight,
           colors: [Color(0xCCFFFFFF), Color(0x22FFFFFF), Color(0x6686D8FF)],
         ).createShader(Offset.zero & size),
+    );
+
+    final leftHighlight = Path()
+      ..moveTo(size.width * 0.25, size.height * 0.14)
+      ..quadraticBezierTo(
+        size.width * 0.19,
+        size.height * 0.48,
+        size.width * 0.29,
+        size.height * 0.78,
+      );
+    canvas.drawPath(
+      leftHighlight,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3.2
+        ..strokeCap = StrokeCap.round
+        ..color = Colors.white.withValues(alpha: 0.27),
     );
   }
 
