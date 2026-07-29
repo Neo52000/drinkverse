@@ -247,19 +247,28 @@ class _DrinkVesselState extends State<DrinkVessel>
   }
 }
 
-/// Silhouette de verre par [GlassType], en fractions de largeur (0..1).
+/// Silhouette de verre par [GlassType], en fractions de largeur/hauteur
+/// (0..1).
 ///
 /// Le solveur de vagues continue de représenter la largeur *totale* du
-/// canvas — aucune influence sur la physique. Cette géométrie n'est qu'un
-/// clip visuel appliqué par-dessus, partagé entre [_ScreenGlassPainter] (le
-/// clip) et [_ScreenEdgePainter] (le contour doit suivre la même
-/// silhouette, pas un rectangle plein).
+/// canvas — aucune influence sur la physique. Le contour des parois
+/// ([toPath]) n'est qu'un clip visuel appliqué par-dessus, partagé entre
+/// [_ScreenGlassPainter] (le clip) et [_ScreenEdgePainter] (le contour doit
+/// suivre la même silhouette).
+///
+/// Pour un verre à pied ([fillableBottom] < 1), seule la coupe (la partie
+/// haute) est remplissable — [_ScreenGlassPainter] doit mapper `fillLevel`
+/// sur `fillableBottom * size.height` et non sur `size.height`, sans quoi le
+/// liquide déborderait visuellement dans la tige. La tige et le socle sont
+/// un tracé statique séparé ([staticExtras]), jamais rempli de liquide.
 class _GlassGeometry {
   const _GlassGeometry({
     required this.topLeft,
     required this.topRight,
     required this.bottomLeft,
     required this.bottomRight,
+    required this.curveOut,
+    this.fillableBottom = 1.0,
   });
 
   final double topLeft;
@@ -267,39 +276,111 @@ class _GlassGeometry {
   final double bottomLeft;
   final double bottomRight;
 
-  static const _straight =
-      _GlassGeometry(topLeft: 0, topRight: 1, bottomLeft: 0, bottomRight: 1);
+  /// Bombement des parois (fraction de largeur) : positif = bulbe vers
+  /// l'extérieur (pinte), négatif = paroi qui rentre (coupe).
+  final double curveOut;
+
+  /// Fraction de `size.height` où s'arrête la zone remplissable (bas de la
+  /// coupe pour un verre à pied). `1.0` = toute la hauteur, comportement
+  /// identique à avant l'introduction des verres à pied.
+  final double fillableBottom;
+
+  bool get isStemmed => fillableBottom < 0.999;
+
+  static const _straight = _GlassGeometry(
+      topLeft: 0, topRight: 1, bottomLeft: 0, bottomRight: 1, curveOut: 0);
 
   static _GlassGeometry forType(GlassType type) {
     return switch (type) {
-      // Highball : référence, quasi plein écran.
+      // Highball : référence, parois droites.
       GlassType.highball => _straight,
-      // Pint : évasé vers le haut, façon silhouette tulipe.
+      // Pint : parois galbées vers l'extérieur, base plus étroite que le
+      // haut — silhouette tulipe.
       GlassType.pint => const _GlassGeometry(
-          topLeft: 0, topRight: 1, bottomLeft: 0.09, bottomRight: 0.91),
-      // Cocktail : resserré vers le haut, façon verre à fond large.
+          topLeft: 0,
+          topRight: 1,
+          bottomLeft: 0.09,
+          bottomRight: 0.91,
+          curveOut: 0.05),
+      // Mug : parois quasi droites avec un très léger galbe (effet
+      // céramique) ; l'anse est ajoutée séparément dans _ScreenEdgePainter.
+      GlassType.mug => const _GlassGeometry(
+          topLeft: 0,
+          topRight: 1,
+          bottomLeft: 0,
+          bottomRight: 1,
+          curveOut: 0.022),
+      // Cocktail : vrai verre à pied — coupe évasée qui se referme en
+      // courbe vers un col étroit, tige et socle non remplissables.
       GlassType.cocktail => const _GlassGeometry(
-          topLeft: 0.11, topRight: 0.89, bottomLeft: 0, bottomRight: 1),
-      // Mug : même silhouette que highball, l'anse est ajoutée séparément
-      // dans _ScreenEdgePainter.
-      GlassType.mug => _straight,
+          topLeft: 0,
+          topRight: 1,
+          bottomLeft: 0.44,
+          bottomRight: 0.56,
+          curveOut: -0.03,
+          fillableBottom: 0.58),
     };
   }
 
+  /// Contour des parois remplissables (la coupe, pour un verre à pied).
   Path toPath(Size size, {double cornerRadius = 6}) {
     final tl = topLeft * size.width;
     final tr = topRight * size.width;
     final bl = bottomLeft * size.width;
     final br = bottomRight * size.width;
+    final bottomY = fillableBottom * size.height;
+    final midY = bottomY / 2;
+    final bulge = curveOut * size.width;
     final r = math.min(cornerRadius, (tr - tl) / 2);
-    return Path()
+
+    final path = Path()
       ..moveTo(tl, r)
       ..quadraticBezierTo(tl, 0, tl + r, 0)
       ..lineTo(tr - r, 0)
       ..quadraticBezierTo(tr, 0, tr, r)
-      ..lineTo(br, size.height)
-      ..lineTo(bl, size.height)
+      ..quadraticBezierTo(tr + bulge, midY, br, bottomY);
+
+    if (isStemmed) {
+      // La coupe se referme en courbe vers le col plutôt qu'un angle net.
+      final centerX = (bl + br) / 2;
+      final dipY = bottomY + size.height * 0.035;
+      path
+        ..quadraticBezierTo((br + centerX) / 2, dipY, centerX, dipY)
+        ..quadraticBezierTo((bl + centerX) / 2, dipY, bl, bottomY);
+    } else {
+      path.lineTo(bl, bottomY);
+    }
+
+    path
+      ..quadraticBezierTo(bl + bulge, midY, tl, r)
       ..close();
+    return path;
+  }
+
+  /// Tracé statique (tige + socle) pour un verre à pied — jamais rempli de
+  /// liquide, dessiné à part dans [_ScreenEdgePainter]. `null` sinon.
+  Path? staticExtras(Size size) {
+    if (!isStemmed) return null;
+    final centerX = size.width * (bottomLeft + bottomRight) / 2;
+    final bowlBottomY = fillableBottom * size.height;
+    final stemBottomY = size.height * 0.86;
+    final footMidY = size.height * 0.90;
+    final footBottomY = size.height * 0.94;
+    final stemHalfWidth = size.width * 0.022;
+    final footHalfWidth = size.width * 0.12;
+
+    return Path()
+      ..moveTo(centerX - stemHalfWidth, bowlBottomY)
+      ..lineTo(centerX - stemHalfWidth, stemBottomY)
+      ..quadraticBezierTo(
+          centerX - footHalfWidth, stemBottomY, centerX - footHalfWidth, footMidY)
+      ..quadraticBezierTo(
+          centerX - footHalfWidth, footBottomY, centerX, footBottomY)
+      ..quadraticBezierTo(
+          centerX + footHalfWidth, footBottomY, centerX + footHalfWidth, footMidY)
+      ..quadraticBezierTo(
+          centerX + footHalfWidth, stemBottomY, centerX + stemHalfWidth, stemBottomY)
+      ..lineTo(centerX + stemHalfWidth, bowlBottomY);
   }
 }
 
@@ -364,20 +445,28 @@ class _ScreenGlassPainter extends CustomPainter {
     );
   }
 
-  double _surface(double x, Size size) {
+  // Le fillLevel se mappe sur la zone remplissable (toute la hauteur, sauf
+  // pour un verre à pied où c'est seulement le bas de la coupe) — voir
+  // _GlassGeometry.fillableBottom.
+  double _surface(double x, Size size, _GlassGeometry geometry) {
     final normalizedX = (x / size.width).clamp(0.0, 1.0).toDouble();
     final displacement = _sampleSurface(normalizedX);
-    return size.height * (1 - fillLevel.clamp(0.0, 1.0)) +
-        displacement * size.height * 0.44;
+    final bottomY = geometry.fillableBottom * size.height;
+    return bottomY * (1 - fillLevel.clamp(0.0, 1.0)) + displacement * bottomY * 0.44;
   }
 
-  Path _surfaceLine(Size size, {double offset = 0, double roughness = 0}) {
+  Path _surfaceLine(
+    Size size,
+    _GlassGeometry geometry, {
+    double offset = 0,
+    double roughness = 0,
+  }) {
     final path = Path();
     final samples = math.max(280, (size.width * 0.9).round());
     for (var i = 0; i <= samples; i++) {
       final x = size.width * i / samples;
       final noise = math.sin(i * 0.31 + progress * math.pi * 2.4) * roughness;
-      final y = _surface(x, size) + offset + noise;
+      final y = _surface(x, size, geometry) + offset + noise;
       i == 0 ? path.moveTo(x, y) : path.lineTo(x, y);
     }
     return path;
@@ -385,8 +474,9 @@ class _ScreenGlassPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    final geometry = _GlassGeometry.forType(drink.glassType);
     canvas.save();
-    canvas.clipPath(_GlassGeometry.forType(drink.glassType).toPath(size));
+    canvas.clipPath(geometry.toPath(size));
 
     canvas.drawRect(
       Offset.zero & size,
@@ -417,7 +507,7 @@ class _ScreenGlassPainter extends CustomPainter {
       return;
     }
 
-    final liquid = _surfaceLine(size)
+    final liquid = _surfaceLine(size, geometry)
       ..lineTo(size.width, size.height + 2)
       ..lineTo(0, size.height + 2)
       ..close();
@@ -442,13 +532,14 @@ class _ScreenGlassPainter extends CustomPainter {
     if (drink.foam) {
       final foam = _surfaceLine(
         size,
+        geometry,
         offset: -foamPx,
         roughness: 0.8 + energy * 1.8,
       );
       const foamSamples = 280;
       for (var i = foamSamples; i >= 0; i--) {
         final x = size.width * i / foamSamples;
-        foam.lineTo(x, _surface(x, size));
+        foam.lineTo(x, _surface(x, size, geometry));
       }
       foam.close();
       canvas.drawPath(
@@ -469,6 +560,7 @@ class _ScreenGlassPainter extends CustomPainter {
       canvas.drawPath(
         _surfaceLine(
           size,
+          geometry,
           offset: -foamPx,
           roughness: 0.8 + energy * 1.8,
         ),
@@ -486,8 +578,8 @@ class _ScreenGlassPainter extends CustomPainter {
         final seedX = ((i * 131 + 53) % 991) / 991;
         final phase = (progress * (0.55 + (i % 5) * 0.09) + i * 0.213) % 1;
         final x = seedX * size.width;
-        final top = _surface(x, size) - foamPx;
-        final bottom = _surface(x, size);
+        final top = _surface(x, size, geometry) - foamPx;
+        final bottom = _surface(x, size, geometry);
         final y = top + phase * math.max(bottom - top, 1);
         final popAlpha = ((1 - phase) * 0.55).clamp(0.0, 0.55);
         canvas.drawCircle(
@@ -502,10 +594,11 @@ class _ScreenGlassPainter extends CustomPainter {
     }
 
     if (drink.ice) {
-      _drawIce(canvas, size);
+      _drawIce(canvas, size, geometry);
     }
 
     if (bubblesEnabled && bubbleProfile.enabled) {
+      final bowlBottom = geometry.fillableBottom * size.height;
       final count =
           bubbleProfile.baseCount + (energy * bubbleProfile.motionBoost).round();
       for (var i = 0; i < count; i++) {
@@ -516,10 +609,10 @@ class _ScreenGlassPainter extends CustomPainter {
         final drift = gravityX * phase * bubbleProfile.horizontalDrift * 10;
         final x = seedX * size.width - drift;
         final clampedX = x.clamp(0.0, size.width).toDouble();
-        final top = _surface(clampedX, size);
-        final y = size.height - phase * math.max(size.height - top, 1) -
+        final top = _surface(clampedX, size, geometry);
+        final y = bowlBottom - phase * math.max(bowlBottom - top, 1) -
             gravityY * phase * 8;
-        if (x < 0 || x > size.width || y <= top + 4 || y > size.height) {
+        if (x < 0 || x > size.width || y <= top + 4 || y > bowlBottom) {
           continue;
         }
         final radius = bubbleProfile.minRadius +
@@ -538,7 +631,7 @@ class _ScreenGlassPainter extends CustomPainter {
 
     if (flow > 0.02) {
       final edgeX = slope >= 0 ? size.width : 0.0;
-      final edgeY = _surface(edgeX, size) - foamPx * 0.2;
+      final edgeY = _surface(edgeX, size, geometry) - foamPx * 0.2;
       final direction = slope >= 0 ? 1.0 : -1.0;
       final stream = Path()
         ..moveTo(edgeX, edgeY)
@@ -590,12 +683,12 @@ class _ScreenGlassPainter extends CustomPainter {
     canvas.restore();
   }
 
-  void _drawIce(Canvas canvas, Size size) {
+  void _drawIce(Canvas canvas, Size size, _GlassGeometry geometry) {
     if (fillLevel <= 0.04) return;
     for (var i = 0; i < 5; i++) {
       final ratio = (i + 1) / 6;
       final x = size.width * ratio;
-      final y = _surface(x, size) + 26 + (i % 2) * 18;
+      final y = _surface(x, size, geometry) + 26 + (i % 2) * 18;
       canvas.save();
       canvas.translate(x, y);
       canvas.rotate(
@@ -723,6 +816,35 @@ class _ScreenEdgePainter extends CustomPainter {
     if (glassType == GlassType.mug) {
       _drawHandle(canvas, size);
     }
+
+    final extras = geometry.staticExtras(size);
+    if (extras != null) {
+      _drawStemAndFoot(canvas, extras);
+    }
+  }
+
+  // Tige + socle d'un verre à pied : jamais rempli de liquide (voir
+  // _GlassGeometry.staticExtras), juste tracé avec le même style de bord
+  // que le reste du verre.
+  void _drawStemAndFoot(Canvas canvas, Path extras) {
+    canvas.drawPath(
+      extras,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.2
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..color = Colors.white.withValues(alpha: 0.26),
+    );
+    canvas.drawPath(
+      extras,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 0.8
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..color = Colors.white.withValues(alpha: 0.42),
+    );
   }
 
   void _drawHandle(Canvas canvas, Size size) {
