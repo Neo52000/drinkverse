@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+import 'drink_motion_profile.dart';
+
 class FluidSolver {
   FluidSolver({this.columns = 64})
       : height = List<double>.filled(columns, 0),
@@ -35,6 +37,36 @@ class FluidSolver {
   // Surplus de mousse juste après un service, qui retombe lentement (~30s)
   // vers le niveau de base au lieu d'y converger quasi instantanément.
   double _foamBoost = 0;
+
+  // Facteurs d'échelle par boisson (voir applyMotionProfile) : 1.0 tant
+  // qu'aucun profil n'a été appliqué, donc le comportement par défaut est
+  // inchangé pour tout code qui n'utilise pas cette fonctionnalité.
+  double _forceScale = 1;
+  double _propagationScale = 1;
+  double _dampingScale = 1;
+  double _tiltScale = 1;
+  double _foamScale = 1;
+
+  // Le tuning V7.3 (vagues) et la décroissance de mousse ont été validés en
+  // prenant le profil "Bières" comme référence. Les facteurs d'échelle sont
+  // donc des ratios par rapport à ces valeurs — pour la bière ils valent
+  // exactement 1.0, donc son comportement ne change jamais.
+  static const _beerWaveStrength = 0.72;
+  static const _beerWaveSpeed = 0.78;
+  static const _beerDamping = 0.90;
+  static const _beerTiltResponse = 0.82;
+  static const _beerFoamPersistence = 0.96;
+
+  /// Applique les paramètres physiques d'une boisson sans recréer
+  /// l'instance (le [height] existant reste la même liste, ce qui compte
+  /// pour DrinkVessel qui en garde une vue non-copiante).
+  void applyMotionProfile(DrinkMotionProfile profile) {
+    _forceScale = profile.waveStrength / _beerWaveStrength;
+    _propagationScale = profile.waveSpeed / _beerWaveSpeed;
+    _dampingScale = profile.damping / _beerDamping;
+    _tiltScale = profile.tiltResponse / _beerTiltResponse;
+    _foamScale = profile.foamPersistence / _beerFoamPersistence;
+  }
 
   void reset() {
     slope = 0;
@@ -91,9 +123,10 @@ class FluidSolver {
     required double flow,
     required double progress,
   }) {
-    final acceleration = (targetSlope - slope) * 19.5 -
-        slopeVelocity * 4.6 +
-        rotationImpulse * 0.17;
+    final acceleration = ((targetSlope - slope) * 19.5 -
+            slopeVelocity * 4.6 +
+            rotationImpulse * 0.17) *
+        _tiltScale;
     slopeVelocity += acceleration * dt;
     slope += slopeVelocity * dt;
     slope = slope.clamp(-1.45, 1.45).toDouble();
@@ -120,16 +153,16 @@ class FluidSolver {
         final wallPressure = -slopeVelocity * x * edgeWeight * 0.050;
         final restoring = (equilibrium - height[i]) * 21;
         final speed = _velocity[i].abs();
-        final damping =
-            _velocity[i] * (1.6 + motionEnergy * 4.4 + speed * 0.9);
+        final damping = _velocity[i] *
+            (1.6 + motionEnergy * 4.4 + speed * 0.9) *
+            _dampingScale;
 
-        final force = laplacian * 112 +
-            velocityLaplacian * 4.8 +
-            restoring -
+        final force = laplacian * 112 * _forceScale +
+            velocityLaplacian * 4.8 * _propagationScale +
+            restoring * _forceScale -
             damping +
-            primaryWave +
-            secondaryWave +
-            wallPressure;
+            (primaryWave + secondaryWave) * _forceScale +
+            wallPressure * _forceScale;
 
         _nextVelocity[i] = _velocity[i] + force * step;
         _next[i] = height[i] + _nextVelocity[i] * step;
@@ -197,6 +230,10 @@ class FluidSolver {
     foam = foam.clamp(0.055, 0.22).toDouble();
     motionEnergy *= math.pow(0.038, dt).toDouble();
     rotationImpulse *= math.pow(0.060, dt).toDouble();
+    // Demi-vie ≈ 30s pour la bière (référence) : la tête de mousse retombe
+    // progressivement après un service au lieu de se stabiliser en moins
+    // d'une seconde. _foamScale étire/compresse cette durée par boisson.
+    _foamBoost *= math.pow(0.977, dt / _foamScale).toDouble();
     _foamBoost *= math.pow(0.977, dt).toDouble();
   }
 }

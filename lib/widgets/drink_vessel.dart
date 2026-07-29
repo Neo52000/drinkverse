@@ -6,11 +6,12 @@ import 'package:flutter/material.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
 import '../models/drink.dart';
+import '../physics/drink_bubble_profile.dart';
+import '../physics/drink_motion_profile.dart';
 import '../physics/fluid_solver.dart';
 import '../physics/gravity_engine.dart';
 import '../physics/pour_engine.dart';
 import '../services/drink_audio_service.dart';
-import 'drink_glass.dart';
 
 class DrinkVessel extends StatefulWidget {
   const DrinkVessel({
@@ -23,7 +24,7 @@ class DrinkVessel extends StatefulWidget {
   });
 
   static const String debugVersion =
-      'DEV • PHYSICS V7.3 • CONSERVATIVE WAVES';
+      'DEV • PHYSICS V7.4 • UNIFIED PROFILES';
 
   final Drink drink;
   final double fillLevel;
@@ -60,12 +61,18 @@ class _DrinkVesselState extends State<DrinkVessel>
   bool _wasEmpty = false;
   double _lastReportedFlow = 0;
 
-  bool get _screenGlassMode => widget.drink.foam;
+  // Recalculés uniquement au changement de boisson (pas à chaque frame) : le
+  // moteur avancé sert désormais tous les verres, avec des paramètres par
+  // catégorie plutôt qu'une bascule vers un second moteur.
+  late DrinkMotionProfile _motionProfile;
+  late DrinkBubbleProfile _bubbleProfile;
 
   @override
   void initState() {
     super.initState();
-    _fluid = FluidSolver(columns: 128);
+    _motionProfile = DrinkMotionProfile.forDrink(widget.drink);
+    _bubbleProfile = DrinkBubbleProfile.forDrink(widget.drink);
+    _fluid = FluidSolver(columns: 128)..applyMotionProfile(_motionProfile);
     _pourEngine = PourEngine(widget.fillLevel);
     _wasEmpty = widget.fillLevel <= 0.01;
     _controller = AnimationController.unbounded(vsync: this)
@@ -86,6 +93,9 @@ class _DrinkVesselState extends State<DrinkVessel>
   }
 
   void _reset() {
+    _motionProfile = DrinkMotionProfile.forDrink(widget.drink);
+    _bubbleProfile = DrinkBubbleProfile.forDrink(widget.drink);
+    _fluid.applyMotionProfile(_motionProfile);
     _fluid.reset();
     _pourEngine.reset(widget.fillLevel);
     _wasPouring = false;
@@ -124,8 +134,6 @@ class _DrinkVesselState extends State<DrinkVessel>
     var dt = (elapsed - _lastElapsed).inMicroseconds / 1000000;
     _lastElapsed = elapsed;
     if (dt <= 0 || dt > 0.05) dt = 1 / 60;
-
-    if (!_screenGlassMode) return;
 
     _pourEngine.step(dt: dt, pour: _pour);
     if (_pourEngine.flow > 0.012) {
@@ -175,21 +183,10 @@ class _DrinkVesselState extends State<DrinkVessel>
   }
 
   void _refill() {
-    if (!_screenGlassMode || _pourEngine.displayFill > 0.02) return;
+    if (_pourEngine.displayFill > 0.02) return;
     DrinkAudioService.instance.playRefill();
     setState(_reset);
   }
-
-  Drink get _legacyDrink => Drink(
-        name: widget.drink.name,
-        category: widget.drink.category,
-        icon: widget.drink.icon,
-        color: widget.drink.color,
-        subtitle: widget.drink.subtitle,
-        foam: false,
-        ice: widget.drink.ice,
-        glassType: widget.drink.glassType,
-      );
 
   @override
   void dispose() {
@@ -205,7 +202,6 @@ class _DrinkVesselState extends State<DrinkVessel>
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(builder: (context, constraints) {
-      final size = constraints.biggest;
       return GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: _refill,
@@ -214,38 +210,28 @@ class _DrinkVesselState extends State<DrinkVessel>
             fit: StackFit.expand,
             clipBehavior: Clip.none,
             children: [
-              if (_screenGlassMode)
-                CustomPaint(
-                  painter: _ScreenGlassPainter(
-                    drink: widget.drink,
-                    columns: _heightView,
-                    fillLevel: _pourEngine.displayFill,
-                    foamDepth: _fluid.foam,
-                    energy: _fluid.motionEnergy,
-                    residue: _pourEngine.residue,
-                    flow: _pourEngine.flow,
-                    slope: _fluid.slope,
-                    gravityX: _gravityX,
-                    gravityY: _gravityY,
-                    progress: _controller.value,
-                  ),
-                )
-              else
-                SizedBox(
-                  width: size.width,
-                  height: size.height,
-                  child: DrinkGlass(
-                    drink: _legacyDrink,
-                    fillLevel: widget.fillLevel,
-                    bubbles: widget.bubbles,
-                    condensation: widget.condensation,
-                    paused: widget.paused,
-                  ),
+              CustomPaint(
+                painter: _ScreenGlassPainter(
+                  drink: widget.drink,
+                  columns: _heightView,
+                  fillLevel: _pourEngine.displayFill,
+                  foamDepth: _fluid.foam,
+                  energy: _fluid.motionEnergy,
+                  residue: _pourEngine.residue,
+                  flow: _pourEngine.flow,
+                  slope: _fluid.slope,
+                  gravityX: _gravityX,
+                  gravityY: _gravityY,
+                  progress: _controller.value,
+                  iceMobility: _motionProfile.iceMobility,
+                  bubbleProfile: _bubbleProfile,
+                  bubblesEnabled: widget.bubbles,
+                  condensation: widget.condensation,
                 ),
-              if (_screenGlassMode)
-                const IgnorePointer(
-                  child: CustomPaint(painter: _ScreenEdgePainter()),
-                ),
+              ),
+              const IgnorePointer(
+                child: CustomPaint(painter: _ScreenEdgePainter()),
+              ),
               const Positioned(
                 top: 12,
                 right: 12,
@@ -272,6 +258,10 @@ class _ScreenGlassPainter extends CustomPainter {
     required this.gravityX,
     required this.gravityY,
     required this.progress,
+    required this.iceMobility,
+    required this.bubbleProfile,
+    required this.bubblesEnabled,
+    required this.condensation,
   });
 
   final Drink drink;
@@ -285,6 +275,10 @@ class _ScreenGlassPainter extends CustomPainter {
   final double gravityX;
   final double gravityY;
   final double progress;
+  final double iceMobility;
+  final DrinkBubbleProfile bubbleProfile;
+  final bool bubblesEnabled;
+  final bool condensation;
 
   double _catmullRom(double p0, double p1, double p2, double p3, double t) {
     final t2 = t * t;
@@ -382,84 +376,102 @@ class _ScreenGlassPainter extends CustomPainter {
         ).createShader(Offset.zero & size),
     );
 
-    final foamPx = size.height * foamDepth;
-    final foam = _surfaceLine(
-      size,
-      offset: -foamPx,
-      roughness: 0.8 + energy * 1.8,
-    );
-    const foamSamples = 280;
-    for (var i = foamSamples; i >= 0; i--) {
-      final x = size.width * i / foamSamples;
-      foam.lineTo(x, _surface(x, size));
-    }
-    foam.close();
-    canvas.drawPath(
-      foam,
-      Paint()
-        ..shader = const LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            Color(0xFFFFFFFF),
-            Color(0xFFFFFBF1),
-            Color(0xFFF1DCB1),
-            Color(0xFFC99344),
-          ],
-        ).createShader(Offset.zero & size),
-    );
-
-    canvas.drawPath(
-      _surfaceLine(
+    final foamPx = drink.foam ? size.height * foamDepth : 0.0;
+    if (drink.foam) {
+      final foam = _surfaceLine(
         size,
         offset: -foamPx,
         roughness: 0.8 + energy * 1.8,
-      ),
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeCap = StrokeCap.round
-        ..strokeWidth = 3
-        ..color = Colors.white.withValues(alpha: 0.96),
-    );
+      );
+      const foamSamples = 280;
+      for (var i = foamSamples; i >= 0; i--) {
+        final x = size.width * i / foamSamples;
+        foam.lineTo(x, _surface(x, size));
+      }
+      foam.close();
+      canvas.drawPath(
+        foam,
+        Paint()
+          ..shader = const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Color(0xFFFFFFFF),
+              Color(0xFFFFFBF1),
+              Color(0xFFF1DCB1),
+              Color(0xFFC99344),
+            ],
+          ).createShader(Offset.zero & size),
+      );
 
-    // Texture de bulles dans la mousse : la mousse est déjà quasi blanche,
-    // donc un contour ambré discret se voit mieux qu'un remplissage blanc.
-    final foamBubbleCount = 40 + (energy * 40).round();
-    for (var i = 0; i < foamBubbleCount; i++) {
-      final seedX = ((i * 131 + 53) % 991) / 991;
-      final phase = (progress * (0.55 + (i % 5) * 0.09) + i * 0.213) % 1;
-      final x = seedX * size.width;
-      final top = _surface(x, size) - foamPx;
-      final bottom = _surface(x, size);
-      final y = top + phase * math.max(bottom - top, 1);
-      final popAlpha = ((1 - phase) * 0.55).clamp(0.0, 0.55);
-      canvas.drawCircle(
-        Offset(x, y),
-        0.6 + (i % 4) * 0.4,
+      canvas.drawPath(
+        _surfaceLine(
+          size,
+          offset: -foamPx,
+          roughness: 0.8 + energy * 1.8,
+        ),
         Paint()
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 0.6
-          ..color = const Color(0xFFC99344).withValues(alpha: popAlpha),
+          ..strokeCap = StrokeCap.round
+          ..strokeWidth = 3
+          ..color = Colors.white.withValues(alpha: 0.96),
       );
+
+      // Texture de bulles dans la mousse : la mousse est déjà quasi blanche,
+      // donc un contour ambré discret se voit mieux qu'un remplissage blanc.
+      final foamBubbleCount = 40 + (energy * 40).round();
+      for (var i = 0; i < foamBubbleCount; i++) {
+        final seedX = ((i * 131 + 53) % 991) / 991;
+        final phase = (progress * (0.55 + (i % 5) * 0.09) + i * 0.213) % 1;
+        final x = seedX * size.width;
+        final top = _surface(x, size) - foamPx;
+        final bottom = _surface(x, size);
+        final y = top + phase * math.max(bottom - top, 1);
+        final popAlpha = ((1 - phase) * 0.55).clamp(0.0, 0.55);
+        canvas.drawCircle(
+          Offset(x, y),
+          0.6 + (i % 4) * 0.4,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 0.6
+            ..color = const Color(0xFFC99344).withValues(alpha: popAlpha),
+        );
+      }
     }
 
-    final carbonation = 150 + (energy * 90).round();
-    for (var i = 0; i < carbonation; i++) {
-      final seedX = ((i * 83 + 17) % 997) / 997;
-      final phase = (progress * (0.42 + (i % 8) * 0.055) + i * 0.131) % 1;
-      final x = seedX * size.width - gravityX * phase * 18;
-      final top = _surface(x.clamp(0.0, size.width).toDouble(), size);
-      final y = size.height - phase * math.max(size.height - top, 1) -
-          gravityY * phase * 8;
-      if (x < 0 || x > size.width || y <= top + 4 || y > size.height) continue;
-      canvas.drawCircle(
-        Offset(x, y),
-        0.6 + (i % 6) * 0.28,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 0.7
-          ..color = Colors.white.withValues(alpha: 0.13 + energy * 0.10),
-      );
+    if (drink.ice) {
+      _drawIce(canvas, size);
+    }
+
+    if (bubblesEnabled && bubbleProfile.enabled) {
+      final count =
+          bubbleProfile.baseCount + (energy * bubbleProfile.motionBoost).round();
+      for (var i = 0; i < count; i++) {
+        final seedX = ((i * 83 + 17) % 997) / 997;
+        final speed = bubbleProfile.minSpeed +
+            (i % 8) / 8 * bubbleProfile.speedSpread;
+        final phase = (progress * speed + i * 0.131) % 1;
+        final drift = gravityX * phase * bubbleProfile.horizontalDrift * 10;
+        final x = seedX * size.width - drift;
+        final clampedX = x.clamp(0.0, size.width).toDouble();
+        final top = _surface(clampedX, size);
+        final y = size.height - phase * math.max(size.height - top, 1) -
+            gravityY * phase * 8;
+        if (x < 0 || x > size.width || y <= top + 4 || y > size.height) {
+          continue;
+        }
+        final radius = bubbleProfile.minRadius +
+            (i % 6) / 6 * bubbleProfile.radiusSpread;
+        canvas.drawCircle(
+          Offset(x, y),
+          radius,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 0.7
+            ..color = Colors.white
+                .withValues(alpha: bubbleProfile.opacity * (0.6 + energy * 0.4)),
+        );
+      }
     }
 
     if (flow > 0.02) {
@@ -508,6 +520,52 @@ class _ScreenGlassPainter extends CustomPainter {
         );
       }
     }
+
+    if (condensation) {
+      _drawCondensation(canvas, size);
+    }
+  }
+
+  void _drawIce(Canvas canvas, Size size) {
+    if (fillLevel <= 0.04) return;
+    for (var i = 0; i < 5; i++) {
+      final ratio = (i + 1) / 6;
+      final x = size.width * ratio;
+      final y = _surface(x, size) + 26 + (i % 2) * 18;
+      canvas.save();
+      canvas.translate(x, y);
+      canvas.rotate(
+        (i - 2) * 0.12 + slope * 0.16 * iceMobility + energy * 0.14 * iceMobility,
+      );
+      final cubeSize = 30.0;
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromCenter(center: Offset.zero, width: cubeSize, height: cubeSize),
+        Radius.circular(cubeSize * 0.2),
+      );
+      canvas.drawRRect(rect, Paint()..color = Colors.white.withValues(alpha: 0.14));
+      canvas.drawRRect(
+        rect,
+        Paint()
+          ..color = Colors.white.withValues(alpha: 0.42)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.35,
+      );
+      canvas.restore();
+    }
+  }
+
+  void _drawCondensation(Canvas canvas, Size size) {
+    const count = 46;
+    for (var i = 0; i < count; i++) {
+      final x = 7 + ((i * 67) % 1000) / 1000 * (size.width - 14);
+      final y = 12 + ((i * 89) % 1000) / 1000 * (size.height - 24);
+      final radius = 1.3 + (i % 4) * 0.62;
+      canvas.drawCircle(
+        Offset(x, y),
+        radius,
+        Paint()..color = Colors.white.withValues(alpha: 0.14),
+      );
+    }
   }
 
   @override
@@ -539,12 +597,48 @@ class _ScreenEdgePainter extends CustomPainter {
           colors: [Colors.white.withValues(alpha: 0.18), Colors.transparent],
         ).createShader(right),
     );
+    // Reflet diagonal type "verre" en haut à gauche, façon éclat de lumière
+    // sur une paroi en verre.
+    final sheen = Path()
+      ..moveTo(size.width * 0.06, 0)
+      ..lineTo(size.width * 0.34, 0)
+      ..lineTo(size.width * 0.14, size.height * 0.46)
+      ..lineTo(0, size.height * 0.30)
+      ..close();
+    canvas.drawPath(
+      sheen,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Colors.white.withValues(alpha: 0.16), Colors.transparent],
+        ).createShader(Offset.zero & size)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10),
+    );
+
+    // Liseré du rebord supérieur du verre.
+    canvas.drawLine(
+      Offset(size.width * 0.06, 1),
+      Offset(size.width * 0.94, 1),
+      Paint()
+        ..color = Colors.white.withValues(alpha: 0.30)
+        ..strokeWidth = 1.4
+        ..strokeCap = StrokeCap.round,
+    );
+
     canvas.drawRect(
       Offset.zero & size,
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2.2
-        ..color = Colors.white.withValues(alpha: 0.23),
+        ..shader = LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            Colors.white.withValues(alpha: 0.34),
+            Colors.white.withValues(alpha: 0.14),
+          ],
+        ).createShader(Offset.zero & size),
     );
   }
 
