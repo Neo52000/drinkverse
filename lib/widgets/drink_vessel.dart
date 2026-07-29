@@ -9,6 +9,7 @@ import '../models/drink.dart';
 import '../physics/fluid_solver.dart';
 import '../physics/gravity_engine.dart';
 import '../physics/pour_engine.dart';
+import '../services/drink_audio_service.dart';
 import 'drink_glass.dart';
 
 class DrinkVessel extends StatefulWidget {
@@ -54,6 +55,11 @@ class _DrinkVesselState extends State<DrinkVessel>
   double _pour = 0;
   Duration _lastElapsed = Duration.zero;
 
+  bool _wasPouring = false;
+  bool _wasFizzing = false;
+  bool _wasEmpty = false;
+  double _lastReportedFlow = 0;
+
   bool get _screenGlassMode => widget.drink.foam;
 
   @override
@@ -61,10 +67,12 @@ class _DrinkVesselState extends State<DrinkVessel>
     super.initState();
     _fluid = FluidSolver(columns: 128);
     _pourEngine = PourEngine(widget.fillLevel);
+    _wasEmpty = widget.fillLevel <= 0.01;
     _controller = AnimationController.unbounded(vsync: this)
       ..addListener(_tick)
       ..repeat(min: 0, max: 1, period: const Duration(seconds: 1));
     _startSensors();
+    DrinkAudioService.instance.initialize();
   }
 
   @override
@@ -80,6 +88,12 @@ class _DrinkVesselState extends State<DrinkVessel>
   void _reset() {
     _fluid.reset();
     _pourEngine.reset(widget.fillLevel);
+    _wasPouring = false;
+    _wasFizzing = false;
+    _wasEmpty = widget.fillLevel <= 0.01;
+    _lastReportedFlow = 0;
+    DrinkAudioService.instance.stopPour();
+    DrinkAudioService.instance.stopFizz();
   }
 
   void _startSensors() {
@@ -123,11 +137,46 @@ class _DrinkVesselState extends State<DrinkVessel>
       flow: _pourEngine.flow,
       progress: _controller.value,
     );
+    _updateAudio();
     setState(() {});
+  }
+
+  void _updateAudio() {
+    final flow = _pourEngine.flow;
+    final pouring = flow > 0.012;
+    if (pouring != _wasPouring) {
+      _wasPouring = pouring;
+      if (pouring) {
+        DrinkAudioService.instance.startPour(intensity: flow);
+      } else {
+        DrinkAudioService.instance.stopPour();
+      }
+    } else if (pouring && (flow - _lastReportedFlow).abs() > 0.03) {
+      _lastReportedFlow = flow;
+      DrinkAudioService.instance.updatePourIntensity(flow);
+    }
+
+    final energy = _fluid.motionEnergy;
+    final fizzing = energy > 0.16;
+    if (fizzing != _wasFizzing) {
+      _wasFizzing = fizzing;
+      if (fizzing) {
+        DrinkAudioService.instance.startFizz(intensity: energy);
+      } else {
+        DrinkAudioService.instance.stopFizz();
+      }
+    }
+
+    final isEmpty = _pourEngine.displayFill <= 0.01;
+    if (isEmpty && !_wasEmpty) {
+      DrinkAudioService.instance.playEmptyGlass();
+    }
+    _wasEmpty = isEmpty;
   }
 
   void _refill() {
     if (!_screenGlassMode || _pourEngine.displayFill > 0.02) return;
+    DrinkAudioService.instance.playRefill();
     setState(_reset);
   }
 
@@ -146,6 +195,7 @@ class _DrinkVesselState extends State<DrinkVessel>
   void dispose() {
     _accelerometer?.cancel();
     _gyroscope?.cancel();
+    DrinkAudioService.instance.stopAll();
     _controller
       ..removeListener(_tick)
       ..dispose();
@@ -371,6 +421,27 @@ class _ScreenGlassPainter extends CustomPainter {
         ..strokeWidth = 3
         ..color = Colors.white.withValues(alpha: 0.96),
     );
+
+    // Texture de bulles dans la mousse : la mousse est déjà quasi blanche,
+    // donc un contour ambré discret se voit mieux qu'un remplissage blanc.
+    final foamBubbleCount = 40 + (energy * 40).round();
+    for (var i = 0; i < foamBubbleCount; i++) {
+      final seedX = ((i * 131 + 53) % 991) / 991;
+      final phase = (progress * (0.55 + (i % 5) * 0.09) + i * 0.213) % 1;
+      final x = seedX * size.width;
+      final top = _surface(x, size) - foamPx;
+      final bottom = _surface(x, size);
+      final y = top + phase * math.max(bottom - top, 1);
+      final popAlpha = ((1 - phase) * 0.55).clamp(0.0, 0.55);
+      canvas.drawCircle(
+        Offset(x, y),
+        0.6 + (i % 4) * 0.4,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.6
+          ..color = const Color(0xFFC99344).withValues(alpha: popAlpha),
+      );
+    }
 
     final carbonation = 150 + (energy * 90).round();
     for (var i = 0; i < carbonation; i++) {

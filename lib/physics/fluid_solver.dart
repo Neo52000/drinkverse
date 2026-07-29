@@ -23,6 +23,10 @@ class FluidSolver {
   // en à-coup instantané, la cible est approchée progressivement à la place.
   double _pendingPush = 0;
 
+  // Surplus de mousse juste après un service, qui retombe lentement (~30s)
+  // vers le niveau de base au lieu d'y converger quasi instantanément.
+  double _foamBoost = 0;
+
   void reset() {
     slope = 0;
     slopeVelocity = 0;
@@ -30,6 +34,7 @@ class FluidSolver {
     motionEnergy = 0;
     foam = 0.085;
     _pendingPush = 0;
+    _foamBoost = 0;
     for (var i = 0; i < columns; i++) {
       height[i] = 0;
       _velocity[i] = 0;
@@ -61,6 +66,7 @@ class FluidSolver {
 
   void addPourEnergy(double flow) {
     motionEnergy = math.max(motionEnergy, 0.24 + flow * 0.56);
+    _foamBoost = math.max(_foamBoost, 0.6);
   }
 
   void step({
@@ -156,10 +162,14 @@ class FluidSolver {
       }
     }
 
-    final foamTarget = 0.082 + motionEnergy * 0.12 + flow * 0.055;
+    final foamTarget =
+        0.082 + motionEnergy * 0.12 + flow * 0.055 + _foamBoost * 0.30;
     foam += (foamTarget - foam) * dt * (motionEnergy > 0.16 ? 2.6 : 0.28);
     foam = foam.clamp(0.06, 0.22).toDouble();
     motionEnergy *= math.pow(0.038, dt).toDouble();
     rotationImpulse *= math.pow(0.060, dt).toDouble();
+    // Demi-vie ≈ 30s : la tête de mousse retombe progressivement après un
+    // service au lieu de se stabiliser en moins d'une seconde.
+    _foamBoost *= math.pow(0.977, dt).toDouble();
   }
 }
