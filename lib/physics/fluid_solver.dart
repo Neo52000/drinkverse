@@ -19,6 +19,15 @@ class FluidSolver {
   double motionEnergy = 0;
   double foam = 0.085;
 
+  /// Temporary vertical compression of the foam head, from 0 to 1.
+  double foamCompression = 0;
+
+  /// Horizontal foam displacement caused by gravity and rotational inertia.
+  double foamDrift = 0;
+
+  /// Small delayed shear used by the renderer to avoid rigid foam motion.
+  double foamShear = 0;
+
   // Lissage des impulsions gyroscope : évite qu'un event capteur se traduise
   // en à-coup instantané, la cible est approchée progressivement à la place.
   double _pendingPush = 0;
@@ -33,6 +42,9 @@ class FluidSolver {
     rotationImpulse = 0;
     motionEnergy = 0;
     foam = 0.085;
+    foamCompression = 0;
+    foamDrift = 0;
+    foamShear = 0;
     _pendingPush = 0;
     _foamBoost = 0;
     for (var i = 0; i < columns; i++) {
@@ -67,6 +79,10 @@ class FluidSolver {
   void addPourEnergy(double flow) {
     motionEnergy = math.max(motionEnergy, 0.24 + flow * 0.56);
     _foamBoost = math.max(_foamBoost, 0.6);
+    foamCompression = math.max(
+      foamCompression,
+      (0.16 + flow * 0.52).clamp(0.0, 1.0).toDouble(),
+    );
   }
 
   void step({
@@ -103,8 +119,6 @@ class FluidSolver {
         final edgeWeight = x.abs() * x.abs();
         final wallPressure = -slopeVelocity * x * edgeWeight * 0.050;
         final restoring = (equilibrium - height[i]) * 21;
-        // Damping adaptatif : une petite vague (vitesse et énergie faibles)
-        // s'éteint lentement, une grosse vague perd davantage d'énergie.
         final speed = _velocity[i].abs();
         final damping =
             _velocity[i] * (1.6 + motionEnergy * 4.4 + speed * 0.9);
@@ -127,9 +141,6 @@ class FluidSolver {
       }
       final mean = sum / columns;
 
-      // Le clamp ci-dessous peut saturer certaines colonnes et faire dériver
-      // le volume total ; la seconde passe redistribue l'écart résiduel pour
-      // que le volume du liquide reste exactement constant.
       double clampedSum = 0;
       for (var i = 0; i < columns; i++) {
         _velocity[i] = _nextVelocity[i];
@@ -144,15 +155,10 @@ class FluidSolver {
         }
       }
 
-      // Légère perte d'énergie aux parois seulement : la vague rebondit au
-      // lieu d'être absorbée (la condition de bord du Laplacien assure déjà
-      // la réflexion, cette ligne ne fait que dissiper un peu d'énergie).
       const wallEnergyRetention = 0.985;
       _velocity.first *= wallEnergyRetention;
       _velocity.last *= wallEnergyRetention;
 
-      // A light capillary pass removes the digital saw-tooth effect while
-      // preserving the larger inertial wave.
       for (var i = 1; i < columns - 1; i++) {
         _next[i] = height[i] * 0.82 +
             (height[i - 1] + height[i + 1]) * 0.09;
@@ -162,14 +168,35 @@ class FluidSolver {
       }
     }
 
-    final foamTarget =
-        0.082 + motionEnergy * 0.12 + flow * 0.055 + _foamBoost * 0.30;
+    final compressionTarget = (flow * 0.52 +
+            slopeVelocity.abs() * 0.075 +
+            motionEnergy * 0.22)
+        .clamp(0.0, 1.0)
+        .toDouble();
+    final compressionResponse = compressionTarget > foamCompression ? 7.5 : 1.35;
+    foamCompression +=
+        (compressionTarget - foamCompression) * dt * compressionResponse;
+    foamCompression = foamCompression.clamp(0.0, 1.0).toDouble();
+
+    final driftTarget = (slope * 0.34 + rotationImpulse * 0.018)
+        .clamp(-0.46, 0.46)
+        .toDouble();
+    foamDrift += (driftTarget - foamDrift) * dt * 3.2;
+    foamDrift = foamDrift.clamp(-0.46, 0.46).toDouble();
+
+    final shearTarget = (foamDrift - foamShear) + slopeVelocity * 0.018;
+    foamShear += shearTarget * dt * 2.1;
+    foamShear = foamShear.clamp(-0.22, 0.22).toDouble();
+
+    final foamTarget = 0.082 +
+        motionEnergy * 0.12 +
+        flow * 0.055 +
+        _foamBoost * 0.30 -
+        foamCompression * 0.018;
     foam += (foamTarget - foam) * dt * (motionEnergy > 0.16 ? 2.6 : 0.28);
-    foam = foam.clamp(0.06, 0.22).toDouble();
+    foam = foam.clamp(0.055, 0.22).toDouble();
     motionEnergy *= math.pow(0.038, dt).toDouble();
     rotationImpulse *= math.pow(0.060, dt).toDouble();
-    // Demi-vie ≈ 30s : la tête de mousse retombe progressivement après un
-    // service au lieu de se stabiliser en moins d'une seconde.
     _foamBoost *= math.pow(0.977, dt).toDouble();
   }
 }
