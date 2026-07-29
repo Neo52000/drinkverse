@@ -1,4 +1,5 @@
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 /// Façade audio du verre.
@@ -23,17 +24,21 @@ class DrinkAudioService {
   final AudioPlayer _oneShotPlayer =
       AudioPlayer(playerId: 'drinkverse-oneshot');
 
-  bool _initialized = false;
   bool _muted = false;
   bool _pouring = false;
   bool _fizzing = false;
 
+  // Mémorise le Future d'init plutôt qu'un simple booléen : les boucles ne
+  // sont utilisables qu'une fois leur setSource() natif terminé, donc
+  // startPour/startFizz attendent ce même Future avant de jouer quoi que ce
+  // soit — sans ça, un premier appel arrivant avant la fin de l'init (ex.
+  // juste après initState) échouait silencieusement.
+  Future<void>? _initFuture;
+
   bool get muted => _muted;
 
-  Future<void> initialize() async {
-    if (_initialized) return;
-    _initialized = true;
-    await _safe(() async {
+  Future<void> initialize() {
+    return _initFuture ??= _safe(() async {
       await _pourPlayer.setReleaseMode(ReleaseMode.loop);
       await _fizzPlayer.setReleaseMode(ReleaseMode.loop);
       await _pourPlayer.setSource(AssetSource(_pourAsset));
@@ -51,6 +56,7 @@ class DrinkAudioService {
   Future<void> startFizz({double intensity = 0.45}) async {
     if (_muted || _fizzing) return;
     _fizzing = true;
+    await initialize();
     await _safe(() async {
       await _fizzPlayer.setVolume(intensity.clamp(0.0, 1.0));
       await _fizzPlayer.resume();
@@ -67,6 +73,7 @@ class DrinkAudioService {
     if (_muted || _pouring) return;
     _pouring = true;
     await HapticFeedback.selectionClick();
+    await initialize();
     await _safe(() async {
       await _pourPlayer.setVolume(intensity.clamp(0.0, 1.0));
       await _pourPlayer.resume();
@@ -121,14 +128,14 @@ class DrinkAudioService {
     await _safe(() => _oneShotPlayer.dispose());
   }
 
-  /// Avale les erreurs de plateforme (pas de backend audio disponible — cas
-  /// des tests ou d'une plateforme non supportée) : le son est un bonus,
-  /// jamais une raison de faire planter l'UI.
+  /// N'interrompt jamais l'UI pour une erreur audio (le son est un bonus,
+  /// pas une dépendance critique), mais journalise en mode debug — un échec
+  /// totalement silencieux est invérifiable sur device.
   Future<void> _safe(Future<void> Function() action) async {
     try {
       await action();
-    } catch (_) {
-      // Dégradation silencieuse.
+    } catch (e) {
+      debugPrint('DrinkAudioService: $e');
     }
   }
 }
