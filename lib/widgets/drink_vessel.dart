@@ -229,8 +229,10 @@ class _DrinkVesselState extends State<DrinkVessel>
                   condensation: widget.condensation,
                 ),
               ),
-              const IgnorePointer(
-                child: CustomPaint(painter: _ScreenEdgePainter()),
+              IgnorePointer(
+                child: CustomPaint(
+                  painter: _ScreenEdgePainter(glassType: widget.drink.glassType),
+                ),
               ),
               const Positioned(
                 top: 12,
@@ -242,6 +244,62 @@ class _DrinkVesselState extends State<DrinkVessel>
         ),
       );
     });
+  }
+}
+
+/// Silhouette de verre par [GlassType], en fractions de largeur (0..1).
+///
+/// Le solveur de vagues continue de représenter la largeur *totale* du
+/// canvas — aucune influence sur la physique. Cette géométrie n'est qu'un
+/// clip visuel appliqué par-dessus, partagé entre [_ScreenGlassPainter] (le
+/// clip) et [_ScreenEdgePainter] (le contour doit suivre la même
+/// silhouette, pas un rectangle plein).
+class _GlassGeometry {
+  const _GlassGeometry({
+    required this.topLeft,
+    required this.topRight,
+    required this.bottomLeft,
+    required this.bottomRight,
+  });
+
+  final double topLeft;
+  final double topRight;
+  final double bottomLeft;
+  final double bottomRight;
+
+  static const _straight =
+      _GlassGeometry(topLeft: 0, topRight: 1, bottomLeft: 0, bottomRight: 1);
+
+  static _GlassGeometry forType(GlassType type) {
+    return switch (type) {
+      // Highball : référence, quasi plein écran.
+      GlassType.highball => _straight,
+      // Pint : évasé vers le haut, façon silhouette tulipe.
+      GlassType.pint => const _GlassGeometry(
+          topLeft: 0, topRight: 1, bottomLeft: 0.09, bottomRight: 0.91),
+      // Cocktail : resserré vers le haut, façon verre à fond large.
+      GlassType.cocktail => const _GlassGeometry(
+          topLeft: 0.11, topRight: 0.89, bottomLeft: 0, bottomRight: 1),
+      // Mug : même silhouette que highball, l'anse est ajoutée séparément
+      // dans _ScreenEdgePainter.
+      GlassType.mug => _straight,
+    };
+  }
+
+  Path toPath(Size size, {double cornerRadius = 6}) {
+    final tl = topLeft * size.width;
+    final tr = topRight * size.width;
+    final bl = bottomLeft * size.width;
+    final br = bottomRight * size.width;
+    final r = math.min(cornerRadius, (tr - tl) / 2);
+    return Path()
+      ..moveTo(tl, r)
+      ..quadraticBezierTo(tl, 0, tl + r, 0)
+      ..lineTo(tr - r, 0)
+      ..quadraticBezierTo(tr, 0, tr, r)
+      ..lineTo(br, size.height)
+      ..lineTo(bl, size.height)
+      ..close();
   }
 }
 
@@ -327,6 +385,9 @@ class _ScreenGlassPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    canvas.save();
+    canvas.clipPath(_GlassGeometry.forType(drink.glassType).toPath(size));
+
     canvas.drawRect(
       Offset.zero & size,
       Paint()
@@ -352,6 +413,7 @@ class _ScreenGlassPainter extends CustomPainter {
         textDirection: TextDirection.ltr,
       )..layout(maxWidth: size.width - 40);
       text.paint(canvas, Offset((size.width - text.width) / 2, size.height * 0.42));
+      canvas.restore();
       return;
     }
 
@@ -524,6 +586,8 @@ class _ScreenGlassPainter extends CustomPainter {
     if (condensation) {
       _drawCondensation(canvas, size);
     }
+
+    canvas.restore();
   }
 
   void _drawIce(Canvas canvas, Size size) {
@@ -573,10 +637,21 @@ class _ScreenGlassPainter extends CustomPainter {
 }
 
 class _ScreenEdgePainter extends CustomPainter {
-  const _ScreenEdgePainter();
+  const _ScreenEdgePainter({required this.glassType});
+
+  final GlassType glassType;
 
   @override
   void paint(Canvas canvas, Size size) {
+    final geometry = _GlassGeometry.forType(glassType);
+    final glassPath = geometry.toPath(size);
+
+    // Les reflets/bandes ne doivent apparaître que sur la silhouette réelle
+    // du verre, pas déborder sur le fond visible autour (pint/cocktail sont
+    // tapées, donc différentes d'un simple rectangle plein écran).
+    canvas.save();
+    canvas.clipPath(glassPath);
+
     final left = Rect.fromLTWH(0, 0, size.width * 0.075, size.height);
     final right = Rect.fromLTWH(size.width * 0.925, 0, size.width * 0.075, size.height);
     canvas.drawRect(
@@ -616,18 +691,20 @@ class _ScreenEdgePainter extends CustomPainter {
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10),
     );
 
-    // Liseré du rebord supérieur du verre.
+    // Liseré du rebord supérieur du verre, aligné sur la vraie largeur en
+    // haut de la silhouette (plus étroite pour un cocktail, pleine largeur
+    // pour un highball/mug, etc.).
     canvas.drawLine(
-      Offset(size.width * 0.06, 1),
-      Offset(size.width * 0.94, 1),
+      Offset(geometry.topLeft * size.width + 4, 1),
+      Offset(geometry.topRight * size.width - 4, 1),
       Paint()
         ..color = Colors.white.withValues(alpha: 0.30)
         ..strokeWidth = 1.4
         ..strokeCap = StrokeCap.round,
     );
 
-    canvas.drawRect(
-      Offset.zero & size,
+    canvas.drawPath(
+      glassPath,
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2.2
@@ -640,10 +717,50 @@ class _ScreenEdgePainter extends CustomPainter {
           ],
         ).createShader(Offset.zero & size),
     );
+
+    canvas.restore();
+
+    if (glassType == GlassType.mug) {
+      _drawHandle(canvas, size);
+    }
+  }
+
+  void _drawHandle(Canvas canvas, Size size) {
+    // Arc ouvert à l'intérieur des bornes du widget (pas de débordement
+    // hors du CustomPaint) pour suggérer une anse sans dépasser le cadre.
+    final handleRect = Rect.fromLTWH(
+      size.width * 0.72,
+      size.height * 0.30,
+      size.width * 0.24,
+      size.height * 0.30,
+    );
+    canvas.drawArc(
+      handleRect,
+      -1.15,
+      2.3,
+      false,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 6
+        ..strokeCap = StrokeCap.round
+        ..color = Colors.white.withValues(alpha: 0.22),
+    );
+    canvas.drawArc(
+      handleRect,
+      -1.15,
+      2.3,
+      false,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2
+        ..strokeCap = StrokeCap.round
+        ..color = Colors.white.withValues(alpha: 0.40),
+    );
   }
 
   @override
-  bool shouldRepaint(covariant _ScreenEdgePainter oldDelegate) => false;
+  bool shouldRepaint(covariant _ScreenEdgePainter oldDelegate) =>
+      oldDelegate.glassType != glassType;
 }
 
 class _DebugVersionBadge extends StatelessWidget {
